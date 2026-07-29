@@ -23,16 +23,66 @@ if ! grep -q '^SystemMaxUse=200M' /etc/systemd/journald.conf 2>/dev/null; then
 fi
 ok "journal vacuumed and capped at 200M"
 
-# Only the two obsolete kernels. 6.17.0-40 is running; 6.17.0-41 is the newest.
-for k in 6.14.0-37 6.17.0-35; do
-  if dpkg -l "linux-image-$k-generic" 2>/dev/null | grep -q '^ii'; then
-    apt-get purge -y "linux-image-$k-generic" "linux-headers-$k" \
-                     "linux-headers-$k-generic" "linux-modules-$k-generic" \
-                     "linux-modules-extra-$k-generic" >/dev/null 2>&1
-    ok "removed obsolete kernel $k"
-  fi
+# Old kernels are never purged automatically: on a machine whose only network
+# card depends on a DKMS module, the previous kernel is the recovery path.
+# Candidates exclude the running kernel and the newest installed one.
+RUNNING=$(uname -r | sed 's/-generic$//')
+mapfile -t INSTALLED < <(
+  dpkg-query -W -f='${Package} ${Status}\n' 'linux-image-*-generic' 2>/dev/null \
+    | awk '$NF=="installed"{print $1}' \
+    | sed 's/^linux-image-//; s/-generic$//' \
+    | sort -V
+)
+CANDIDATES=()
+NEWEST=""
+[ "${#INSTALLED[@]}" -gt 0 ] && NEWEST="${INSTALLED[-1]}"
+for k in "${INSTALLED[@]:-}"; do
+  [ -n "$k" ] || continue
+  [ "$k" = "$RUNNING" ] && continue
+  [ "$k" = "$NEWEST" ] && continue
+  CANDIDATES+=("$k")
 done
-update-grub >/dev/null 2>&1
+
+if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+  ok "no obsolete kernels (running $RUNNING, newest $NEWEST)"
+elif [ ! -t 0 ] && [ ! -r /dev/tty ]; then
+  # Never guess when nobody can answer -- see the Timeshift prompt further down.
+  ok "${#CANDIDATES[@]} old kernel(s) present; skipped (no terminal to ask on)"
+else
+  echo "    Running: $RUNNING   Newest: $NEWEST   (both always kept)"
+  echo "    Removable kernels:"
+  for i in "${!CANDIDATES[@]}"; do
+    printf '      %2d) %s  (%s)\n' "$((i+1))" "${CANDIDATES[$i]}" \
+      "$(du -shc /boot/*"${CANDIDATES[$i]}"* /lib/modules/"${CANDIDATES[$i]}"-generic 2>/dev/null \
+         | awk 'END{print $1}')"
+  done
+  printf '    Purge which? [numbers/all/none, default none]: '
+  read -r REPLY < /dev/tty || REPLY=""
+  SELECTED=()
+  case "${REPLY,,}" in
+    all)          SELECTED=("${CANDIDATES[@]}") ;;
+    ''|none|n|no) SELECTED=() ;;
+    *)  # commas or spaces; unquoted expansion is word-split only, never eval'd
+        for n in ${REPLY//,/ }; do
+          case "$n" in
+            [0-9]*) [ "$n" -ge 1 ] 2>/dev/null && [ "$n" -le "${#CANDIDATES[@]}" ] || continue
+                    k="${CANDIDATES[$((n-1))]}"
+                    [[ " ${SELECTED[*]:-} " == *" $k "* ]] || SELECTED+=("$k") ;;
+          esac
+        done ;;
+  esac
+  if [ "${#SELECTED[@]}" -eq 0 ]; then
+    ok "kept all kernels"
+  else
+    for k in "${SELECTED[@]}"; do
+      apt-get purge -y "linux-image-$k-generic" "linux-headers-$k" \
+                       "linux-headers-$k-generic" "linux-modules-$k-generic" \
+                       "linux-modules-extra-$k-generic" >/dev/null 2>&1
+      ok "removed obsolete kernel $k"
+    done
+    update-grub >/dev/null 2>&1
+  fi
+fi
 
 # ------------------------------------------------------------ 2. TIMESHIFT
 say "2/8  Removing Timeshift snapshots (you said you're not using it)"

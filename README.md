@@ -46,12 +46,20 @@ purpose — swapping to compressed RAM is cheaper than evicting page cache.
 Deliberately does **not** touch power management (TLP/ASPM/PPD), Apache/MySQL/PHP
 as installed services, or any XFCE component.
 
-### Not yet portable
+### Old kernels
 
-`optimize-mba.sh` purges a hardcoded list of obsolete kernel versions. That list
-is specific to one machine and goes stale; the `dpkg -l | grep '^ii'` guard makes
-it a harmless no-op elsewhere, but it also means it reclaims nothing. The MySQL
-section assumes `/etc/mysql/mysql.conf.d/` exists.
+Never purged automatically. The script lists removable kernels — everything
+except the running one and the newest — and asks which to remove, defaulting to
+none. If there is no terminal to prompt on, it skips the step entirely.
+
+Keep at least one known-good kernel. On these machines the previous kernel is
+the recovery path: if a DKMS rebuild of `wl` fails, the older kernel is the only
+way back to a working Wi-Fi card, and there is no Ethernet port to fall back on.
+
+### Known rough edges
+
+The MySQL section assumes `/etc/mysql/mysql.conf.d/` exists. Disk-space figures
+in the output are whatever `df` reports for `/`.
 
 ## License
 
