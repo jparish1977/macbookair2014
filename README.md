@@ -61,6 +61,14 @@ way back to a working Wi-Fi card, and there is no Ethernet port to fall back on.
 The MySQL section assumes `/etc/mysql/mysql.conf.d/` exists. Disk-space figures
 in the output are whatever `df` reports for `/`.
 
+## `MACOS.md`
+
+Whether OpenCore Legacy Patcher can run macOS newer than Apple's cutoff
+(Big Sur) on this model. It can, up to Sequoia, and Haswell needs no graphics
+root patches at any version — so SIP stays on and updates need no re-patching.
+The only real obstacle is the 4GB of soldered RAM. Kept so the question stays
+answered.
+
 ## License
 
 Released into the public domain under [the Unlicense](LICENSE). No conditions,
