@@ -1,6 +1,6 @@
 # macbookair2014
 
-Two scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
+Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 (MacBookAir6,1 / 6,2 — Haswell, 4GB RAM, BCM4360 Wi-Fi).
 
 > **These run as root and change system configuration.** Read them before you
@@ -60,6 +60,36 @@ way back to a working Wi-Fi card, and there is no Ethernet port to fall back on.
 
 The MySQL section assumes `/etc/mysql/mysql.conf.d/` exists. Disk-space figures
 in the output are whatever `df` reports for `/`.
+
+## `chromium-google-search.sh`
+
+Makes Google the default search engine in Mint's Chromium.
+
+Mint patches Chromium's prepopulated engine list down to Yahoo and DuckDuckGo,
+both carrying Mint referral codes (`c=19111&surl=intl.linuxmint.com`, `t=lm`).
+Google is not in the list, so it has to be added rather than selected. Editing
+`~/.config/chromium/Default/Preferences` does not work either —
+`default_search_provider_data` is listed under `protection.macs`, so Chromium
+reads an unsigned edit as tampering and reverts it on the next launch.
+
+An enterprise policy in `/etc/chromium/policies/managed/` is the only route that
+survives a restart.
+
+```sh
+sudo ./chromium-google-search.sh          # install
+sudo ./chromium-google-search.sh remove   # undo
+     ./chromium-google-search.sh status   # no root needed
+```
+
+Quit Chromium completely afterwards; policies are read once at startup. Verify
+at `chrome://policy`.
+
+The tradeoff is that policies are mandatory: `chrome://settings/search` will say
+"managed by your organization" and stop being editable. There is no unlocked
+equivalent — the `DefaultSearchProvider*` policies are not recommendable, so
+`/etc/chromium/policies/recommended/` is ignored for them. To keep the setting
+switchable, skip the script and add Google by hand in
+`chrome://settings/searchEngines`.
 
 ## `MACOS.md`
 
