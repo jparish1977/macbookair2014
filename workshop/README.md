@@ -132,6 +132,28 @@ before rebooting, especially if the version sorts above the distro's.
    `EXT4_FS=y` and `USB_XHCI_PCI=y` both looked alarming until checked.
 4. **Stale tree.** `git -C linux fetch --tags` if a ref is not found.
 
+### DKMS on a self-built kernel
+
+Two things bite in order:
+
+**Install the headers package too.** Without it, `dpkg -i linux-image-*.deb`
+prints `dkms: autoinstall ... was skipped since the kernel headers for this
+kernel do not seem to be installed` and builds nothing — so the machine gets a
+kernel with none of its out-of-tree drivers. On the Air that means no Wi-Fi, and
+it is quiet enough to miss in the scroll.
+
+**`bindeb-pkg`'s headers package contains no `.config`.** DKMS warns
+`Kernel config /lib/modules/<rel>/build/.config not found, modules won't be
+signed` and carries on, using `Module.symvers` — `wl` builds fine. But a module
+that reads the config will fail. The build directory keeps a copy, so:
+
+    sudo cp config-used /lib/modules/<rel>/build/.config
+
+Expect out-of-tree modules whose dependencies were trimmed away to fail
+regardless — `facetimehd` cannot build against a kernel with no
+`VIDEOBUF2_CORE`, no matter what the headers contain. See the `--trim` note
+above.
+
 ## Targets that are not x86-64
 
 ### 32-bit x86 — supported, and probably what you actually need
