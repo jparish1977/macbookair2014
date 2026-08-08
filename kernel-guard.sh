@@ -50,11 +50,27 @@ run() {
 
 # Kernels that are actually installed, newest last. Read from the package
 # manager rather than /lib/modules, which keeps stale directories after a purge.
+#
+# The glob is 'linux-image-*', NOT 'linux-image-*-generic'. That narrower
+# pattern was a real hole: a locally built kernel installs as something like
+# linux-image-7.0.0-mba, so this function could not see it, and the guard
+# cheerfully reported "every installed kernel has wifi" while the kernel GRUB
+# was about to boot had no wl at all. Found on 2026-08-08 by installing exactly
+# such a kernel -- a guard that is silently blind is worse than no guard,
+# because it is believed.
+#
+# Widening the glob means meta-packages (linux-image-generic-hwe-24.04 and
+# friends) come along too, so entries are kept only when a real module tree
+# exists for them. That also drops packages whose /lib/modules has been removed,
+# which cannot be booted anyway.
 installed_kernels() {
-  dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' 'linux-image-*-generic' 2>/dev/null \
+  dpkg-query -W -f='${Package} ${db:Status-Abbrev}\n' 'linux-image-*' 2>/dev/null \
     | awk '$2 ~ /^.i/ {print $1}' \
-    | sed 's/^linux-image-//' \
-    | sort -V
+    | sed 's/^linux-image-//; s/^unsigned-//' \
+    | while IFS= read -r rel; do
+        [ -d "/lib/modules/$rel/kernel" ] && printf '%s\n' "$rel"
+      done \
+    | sort -V -u
 }
 
 # Process substitution, not a pipe: `dkms status | grep -q` returns 141 under
