@@ -28,6 +28,7 @@ tree. None of it is recalled or assumed.
 | **The patch itself was built and loaded** | Patched build (`AF9F6279C4AFB73358F535A`) `insmod`ed on this hardware |
 | **With a control condition** | Rule moved aside + stock module reloaded reproduced `[nand-disk]` first, so the subsequent `[none]` means something |
 | **The patched driver holds the level** | 204 set, `systemctl restart fwupd`, still 204 |
+| **All of it re-confirmed on a mainline kernel** | v7.0 built from the tag, installed and booted on the machine (`uname -r` = `7.0.0-mba`); control reproduced the fault, patched module fixed it |
 
 Hardware and kernel actually tested on:
 
@@ -36,15 +37,13 @@ Hardware and kernel actually tested on:
 
 ## What is NOT verified — know this before you send
 
-- **The host kernel is Ubuntu's 7.0.0-28, not a mainline build.** The *driver*
-  tested is mainline's — built from the v7.0 tag, and proven identical to the
-  distro's by matching srcversion — but it was loaded into a distro kernel. For
-  this driver that distinction is thin, and the patch says exactly this rather
-  than overclaiming. If a maintainer wants a full mainline kernel test, build
-  one on iteration8 and retest.
 - **Only tested on one machine so far.** A MacBookAir6,1. Jenni's machine is
   the same model and can confirm it independently once reachable; a second
   model would be better still, but neither is available here.
+
+(The "not tested on mainline" caveat that stood here is **resolved** — see
+below. A mainline v7.0 kernel was built and booted on the affected hardware and
+the whole test re-run on it.)
 - **The lore search was for `applesmc nand-disk`.** A report phrased differently
   ("keyboard backlight turns off") could exist and not match. Worth one more
   search on other terms before sending.
@@ -106,10 +105,11 @@ Present since the driver was added in commit 6f2fad748ccc ("Apple SMC driver
 since the driver did not regress -- what changed is the environment around it.
 Happy to add one if you would prefer.
 
-Tested on a MacBookAir6,1 (BIOS 430.0.0.0.0, Core i5-4260U) running
-7.0.0-28-generic. The distro ships this driver unmodified: applesmc.c built
-from the v7.0 tag has the same srcversion as the distro's module,
-4B4E296F44EBB1541BCA045, so the driver tested here is mainline's.
+Tested on a MacBookAir6,1 (BIOS 430.0.0.0.0, Core i5-4260U), both under
+7.0.0-28-generic and under a mainline v7.0 kernel built from the tag and booted
+on the machine. The distro ships this driver unmodified: applesmc.c built from
+the v7.0 tag has the same srcversion as the distro's module,
+4B4E296F44EBB1541BCA045.
 
 Before, stock module:
 
@@ -142,6 +142,9 @@ which is what makes it hard to attribute from userspace:
           __run_timers+555
           run_timer_softirq+138
           handle_softirqs+229
+
+Re-confirmed on the mainline v7.0 kernel: with the stock module the level is
+lost as above, and with .default_trigger removed it survives.
 ```
 
 Everything after the `---` is notes for reviewers and is dropped by `git am`,
@@ -212,11 +215,10 @@ device and userspace started reading it. Say you are happy to add one.
 The trigger is still attachable from sysfs or udev. And on hardware where it
 does fire, it makes the keyboard backlight unusable, so it is hard to rely on.
 
-**"Did you test on mainline?"** The driver is mainline's — built from the v7.0
-tag, with srcversion matching the distro module, so the source is provably
-identical — and the patched build was loaded on the affected hardware. The
-host kernel was Ubuntu's 7.0.0-28. If they want a full mainline kernel, build
-one on iteration8 and retest; do not claim it until then.
+**"Did you test on mainline?"** Yes, on both counts. The driver source is
+provably mainline's (srcversion matches the v7.0 tag), and a mainline v7.0
+kernel was built, installed and booted on the affected machine, with the whole
+control-and-patch test re-run on it.
 
 **"How do you know the line is what fixed it, and not your udev rule?"** The
 test moves the rule aside and reloads the stock module first, confirming

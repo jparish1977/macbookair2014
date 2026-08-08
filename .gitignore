@@ -1,2 +1,7 @@
 # local session helper, not part of the repo
 resume.sh
+
+# Kernel packages built on the workshop and scp'd here for installation.
+# 33MB of binaries that are rebuildable in 7 minutes from workshop/kbuild.sh --
+# and this repo has twice had stray files swept in by `git add -A`.
+*.deb
