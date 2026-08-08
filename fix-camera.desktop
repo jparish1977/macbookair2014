@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fix Camera
+Comment=Restart the webcam driver when video stops working
+# Runs in a terminal so the sudo password prompt and result are visible; the
+# trailing read keeps the window open long enough to read the outcome. Assumes
+# fix-camera is installed on PATH (sudo install -m755 fix-camera.sh
+# /usr/local/bin/fix-camera).
+Exec=bash -c "fix-camera; echo; read -n1 -s -r -p 'Press any key to close this window.'"
+Icon=camera-web
+Terminal=true
+Categories=Utility;
+Keywords=camera;webcam;video;zoom;facetimehd;fix;
+StartupNotify=false

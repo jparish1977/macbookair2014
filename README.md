@@ -131,6 +131,20 @@ The wedge is provoked by two apps touching the camera simultaneously, so the
 standing rule — which the script reprints on success — is **one camera app at a
 time**: close Cheese before joining a call, close Zoom before opening OBS.
 
+`fix-camera.desktop` is an optional clickable launcher for a non-technical user
+who would rather not open a terminal. It runs the command in a terminal window
+anyway (the sudo prompt and result need to be visible) and holds the window open
+until a key is pressed. Install it into the menu, and optionally onto the
+desktop:
+
+```sh
+sudo desktop-file-install fix-camera.desktop          # adds "Fix Camera" to the menu
+cp fix-camera.desktop ~/Desktop/ && chmod +x ~/Desktop/fix-camera.desktop
+```
+
+On Cinnamon a desktop launcher is untrusted until you right-click it once and
+pick **Allow Launching**; the menu entry needs no such step.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift
