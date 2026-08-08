@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # fix-camera — recover the FaceTime HD camera when it stops working.
 #
-# The facetimehd driver on this MacBook Air stops delivering frames if two apps
-# grab the camera at the same time (or sometimes after a single use). The kernel
-# logs "facetimehd ...: IO: timeout" and every camera app then shows an error.
-# Reloading the driver clears that without a reboot.
+# Sometimes the facetimehd driver stops delivering frames: the kernel logs
+# "facetimehd ...: IO: timeout" and every camera app then shows an error, even
+# ones that worked a minute ago. Reloading the driver is the cheap fix; a reboot
+# is the certain one.
 #
 #   Just run:   fix-camera
 #   It asks for a password once (needed to reload a driver).
 #
-# The one rule that avoids the whole problem: only ONE camera app open at a time
-# — close Zoom before opening OBS, close Cheese before joining a call, etc.
+# What sets it off is not known. "Two camera apps at once" was the popular
+# explanation and was tested directly on this hardware — it does not do it. A
+# second app is simply refused, because V4L2 streaming is exclusive.
 
 set -uo pipefail
 
@@ -108,7 +109,7 @@ say "Result"
 node=$(ls /dev/video* 2>/dev/null | head -1)
 if [ -n "$node" ]; then
   ok "camera is back at $node"
-  info "Open ONE camera app now (Cheese, Zoom, or OBS) — not two at once."
+  info "Open a camera app now (Cheese, Zoom, or OBS)."
 else
   bad "No camera device appeared. A reboot should fix it:  sudo reboot"
   exit 1

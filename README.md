@@ -116,17 +116,25 @@ then on *every* camera app errored — Cheese included. A reboot cleared it
 completely; `dmesg` after the reboot showed zero timeouts and the camera worked
 in Cheese, Zoom and OBS in turn.
 
-Two caveats on the folklore around this, because it is easy to state more than
-was verified:
+**The trigger is unknown.** "Two camera apps at once" was the working theory and
+is repeated all over the internet. It was tested directly, on the same model of
+hardware and the same driver, and it is wrong:
 
-- **The trigger is not confirmed.** Two apps opening the camera at once is the
-  usual explanation and it is consistent with what happened here, but a single
-  grab was never ruled out as sufficient.
-- **`modprobe -r` failing with "in use" was not reproduced.** It happened once,
-  while Zoom was still shutting down. Seconds later `fuser /dev/video*` was
-  empty, no process was in state `D`, and nothing held the device — so on that
-  occasion the module was simply still busy with a dying process, not pinned by
-  anything frozen. Whether a genuinely stuck task can pin it is untested here.
+| Test | Result |
+| --- | --- |
+| Cheese streaming, then Zoom opened on top | no timeout — Zoom gets a clean busy failure and shows a blank preview |
+| OBS alone, 3077 frames over two sessions, closed normally | no timeout, clean stop, no leaks |
+
+V4L2 streaming is exclusive, so a second app is simply refused; it does not
+corrupt anything. What actually provoked the one real wedge we have seen is
+still open. Differences not yet ruled out: it happened on a MacBookAir**6,1**
+rather than a 6,2, on the unpatched driver, during a real Zoom *call* rather
+than a local preview.
+
+**`modprobe -r` failing with "in use" is explained, and it is not a stuck
+task.** See *WirePlumber holds the camera* below. On the one occasion it was
+seen during a wedge, `fuser /dev/video*` was empty seconds later with no process
+in state `D`.
 
 So the script tries the cheap thing first and does not pretend to know more
 than that: it closes the camera apps (Zoom, Cheese, OBS, guvcview), reloads
@@ -142,9 +150,9 @@ Install it as a plain command so it is reachable from any terminal:
 sudo install -m 755 fix-camera.sh /usr/local/bin/fix-camera
 ```
 
-The wedge is provoked by two apps touching the camera simultaneously, so the
-standing rule — which the script reprints on success — is **one camera app at a
-time**: close Cheese before joining a call, close Zoom before opening OBS.
+Running one camera app at a time is still sensible — a second one gets nothing
+anyway — but it is housekeeping, not a fix for the wedge. It was tested and does
+not prevent it, because it does not cause it.
 
 `fix-camera.desktop` is an optional clickable launcher for a non-technical user
 who would rather not open a terminal. It runs the command in a terminal window
@@ -220,6 +228,17 @@ modinfo -F srcversion /lib/modules/"$(uname -r)"/updates/dkms/facetimehd.ko.zst
 
 Reverting is `sudo patch -R -d /usr/src/facetimehd-0.7.0.2 -p1 < …` followed by
 the same rebuild; `patch -b` also leaves `fthd_v4l2.c.orig` behind.
+
+> **Patching the source does not update kernels already built.** `dkms status`
+> reports every kernel as `installed` whether or not its module predates the
+> patch, so it will not tell you. Rebuild each one and check:
+>
+> ```sh
+> for k in $(ls /lib/modules); do
+>   f=/lib/modules/$k/updates/dkms/facetimehd.ko.zst
+>   [ -f "$f" ] && printf '%-22s %s\n' "$k" "$(modinfo -F srcversion "$f")"
+> done
+> ```
 
 **This is not verified to fix the wedge.** It builds, loads and runs the camera
 normally, and the reasoning is confirmed against the 0.7.0.2 source, but
