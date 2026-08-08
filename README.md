@@ -29,6 +29,76 @@ all, including no way to fetch the fix. Two modes:
 sudo ./mba-wifi.sh help
 ```
 
+## `mba-webcam.sh`
+
+Gets the FaceTime HD camera working.
+
+The camera is a Broadcom 1570 `[14e4:1570]` on the **PCIe** bus, not USB, so
+`uvcvideo` never enumerates it and a stock install has no `/dev/video*` at all.
+Nothing is broken — there is simply no in-tree driver. The only one that works
+is [`facetimehd`](https://github.com/patjak/facetimehd), out-of-tree, and it
+needs a firmware blob Apple ships only inside macOS.
+
+Kernel 7.x removed the `vb2_ops` `wait_prepare`/`wait_finish` callbacks, which
+broke every release before 0.7.0.1. The script pins **0.7.0.2** for that reason;
+do not move the pin backwards.
+
+```sh
+sudo ./mba-webcam.sh                 # install (default)
+sudo ./mba-webcam.sh uninstall       # full undo
+     ./mba-webcam.sh status          # no root needed
+     ./mba-webcam.sh install --dry-run
+```
+
+### Tuning a dark picture
+
+```sh
+     ./mba-webcam.sh tune                       # show current values
+sudo ./mba-webcam.sh tune brightness=180 contrast=140
+sudo ./mba-webcam.sh tune --reset              # back to defaults
+```
+
+The driver registers five controls (`fthd_v4l2.c:707`) — `brightness`,
+`contrast`, `saturation`, `hue` (0–255, default 128) and
+`white_balance_automatic` (0/1, default 1). These are real: `brightness`
+dispatches to `fthd_isp_cmd_channel_brightness_set()`, an actual ISP command.
+
+It registers **no exposure and no gain control**, so nothing here lengthens
+sensor integration time. Raising brightness lifts the noise floor along with the
+image — good lighting still matters, it is just not the only lever.
+
+Settings are applied immediately and persisted through a udev rule that matches
+`ATTR{name}=="Apple Facetime HD"` rather than a node number (see below). Use
+`--no-persist` to apply without writing the rule.
+
+Note the control is `white_balance_automatic`, not the kernel's
+`V4L2_CID_AUTO_WHITE_BALANCE` spelling — `v4l2-ctl` rejects the latter. The
+script accepts either and normalises.
+
+### The camera is not necessarily `/dev/video0`
+
+On the machine this was written for it comes up as `/dev/video1` (sysfs index 0)
+because another driver claims the lower minor first. The script resolves the
+node by asking sysfs which one `facetimehd` owns, and the udev rule matches on
+device name — neither assumes a number.
+
+Two things worth knowing:
+
+- **Firmware is a ~2.8MB HTTP byte-range request** into a 10.11.5 update image,
+  not a full download — chosen deliberately for a 4GB machine with a small SSD.
+  If it fails, Apple has usually rotated the CDN URL baked into the upstream
+  Makefile.
+- **DKMS carries it across kernel upgrades** (`AUTOINSTALL=yes`), the same way
+  `broadcom-sta` already does here.
+
+`dkms.conf` upstream does not reliably track the git tag — master still declares
+`0.7.0.1` while `0.7.0.2` is released — so the script reads `PACKAGE_VERSION`
+from the checkout rather than assuming the tag, otherwise `dkms add` fails on a
+source-tree name mismatch.
+
+Washed-out or dark output is this driver's known-weak auto-exposure, not a
+failed install.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift
