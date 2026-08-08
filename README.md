@@ -160,6 +160,74 @@ cp fix-camera.desktop ~/Desktop/ && chmod +x ~/Desktop/fix-camera.desktop
 On Cinnamon a desktop launcher is untrusted until you right-click it once and
 pick **Allow Launching**; the menu entry needs no such step.
 
+### WirePlumber holds the camera
+
+`modprobe -r facetimehd` reports "in use" on a stock Mint desktop even with
+every camera app closed and *no* process holding an fd on `/dev/video*`.
+WirePlumber's V4L2 monitor registers the camera as a PipeWire device
+(`wpctl status` lists it under Video) and keeps a reference to the module.
+
+`fix-camera.sh` therefore tries the plain unload first and only stops
+WirePlumber if that fails — it also carries audio — then restarts it afterwards.
+If you are doing this by hand:
+
+```sh
+systemctl --user stop wireplumber
+sudo modprobe -r facetimehd && sudo modprobe facetimehd
+systemctl --user start wireplumber
+```
+
+## `patches/`
+
+Local patches against the pinned upstream driver, applied to
+`/usr/src/facetimehd-$VER` before the DKMS build.
+
+`fthd-recover-from-firmware-timeout.patch` addresses upstream
+[issue #332](https://github.com/patjak/facetimehd/issues/332) — "one firmware
+timeout kills the camera until the module is reloaded". On stop failure the
+driver did:
+
+```c
+vb2_buffer_done(ctx->vb, VB2_BUF_STATE_DONE);
+ctx->vb = NULL;
+ctx->state = BUF_ALLOC;
+```
+
+`ctx->vb` is the only reference tying a slot to its vb2 buffer. Clearing it
+makes the slot unreachable to `fthd_buffer_prepare()`, which matches
+`BUF_ALLOC` only when `ctx->vb == vb` — so every later prepare returns
+`-ENOBUFS` and the camera is dead in *every* application — and to
+`fthd_buffer_cleanup()`, which finds slots by `ctx->vb`, leaking the iommu and
+dma_desc allocations. The patch keeps `ctx->vb` and reports `VB2_BUF_STATE_ERROR`
+instead of `DONE`, matching the send-failure path already in
+`fthd_buffer_queue()`.
+
+Apply, rebuild and verify:
+
+```sh
+sudo patch -b -d /usr/src/facetimehd-0.7.0.2 -p1 < patches/fthd-recover-from-firmware-timeout.patch
+sudo dkms build   -m facetimehd -v 0.7.0.2 -k "$(uname -r)" --force
+sudo dkms install -m facetimehd -v 0.7.0.2 -k "$(uname -r)" --force
+modinfo -F srcversion /lib/modules/"$(uname -r)"/updates/dkms/facetimehd.ko.zst
+```
+
+> **`dkms install --force` alone does not rebuild.** If a build already exists
+> for that kernel it reinstalls the cached one and prints no "Building module"
+> step, so a source patch silently does not reach the running system. Always run
+> `dkms build --force` first and confirm `srcversion` actually changed — the
+> unpatched 0.7.0.2 is `BFD95833D1A467A419F3EE0`, patched is
+> `594BD4C77FD51B8CD4381BD`.
+
+Reverting is `sudo patch -R -d /usr/src/facetimehd-0.7.0.2 -p1 < …` followed by
+the same rebuild; `patch -b` also leaves `fthd_v4l2.c.orig` behind.
+
+**This is not verified to fix the wedge.** It builds, loads and runs the camera
+normally, and the reasoning is confirmed against the 0.7.0.2 source, but
+provoking a firmware timeout on demand was not possible — the real test is
+whether a future wedge recovers on its own. Upstream is also explicit that this
+addresses the driver's inability to *recover* from a timeout, not the reason the
+firmware times out.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift

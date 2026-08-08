@@ -1,0 +1,29 @@
+--- a/fthd_v4l2.c
++++ b/fthd_v4l2.c
+@@ -292,12 +292,23 @@
+ 		vb2_wait_for_all_buffers(vq);
+ 		pr_debug("done\n");
+ 	} else {
+-	    /* Firmware doesn't respond. */
++	    /* Firmware doesn't respond. Return the buffers, but keep ctx->vb
++	     * set: it is the only reference tying this slot to its vb2 buffer.
++	     * Clearing it made the slot unreachable to both fthd_buffer_prepare()
++	     * (which matches BUF_ALLOC only when ctx->vb == vb, so every later
++	     * prepare returned -ENOBUFS) and fthd_buffer_cleanup() (which finds
++	     * slots by ctx->vb, so the iommu and dma_desc allocations leaked).
++	     * One firmware timeout therefore killed the camera for every
++	     * application until the module was reloaded.
++	     *
++	     * These buffers did not complete, so report them as ERROR rather
++	     * than DONE. This mirrors the send-failure path in
++	     * fthd_buffer_queue().
++	     */
+ 	    for(i = 0; i < FTHD_BUFFERS;i++) {
+ 		    ctx = dev_priv->h2t_bufs + i;
+ 		    if (ctx->state == BUF_DRV_QUEUED || ctx->state == BUF_HW_QUEUED) {
+-			    vb2_buffer_done(ctx->vb, VB2_BUF_STATE_DONE);
+-			    ctx->vb = NULL;
++			    vb2_buffer_done(ctx->vb, VB2_BUF_STATE_ERROR);
+ 			    ctx->state = BUF_ALLOC;
+ 		}
+ 	    }

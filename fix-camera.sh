@@ -42,17 +42,52 @@ fuser -k -KILL /dev/video* 2>/dev/null
 sleep 1
 ok "camera apps closed"
 
+# WirePlumber's V4L2 monitor registers the camera as a PipeWire device and holds
+# a reference to the module, so on a stock Mint desktop `modprobe -r` reports
+# "in use" even with every camera app closed and no process holding an fd on
+# /dev/video*. Stopping it is what actually frees the module — but it also
+# carries audio, so only stop it if the plain unload fails, and always start it
+# again afterwards.
+desktop_user() {
+  # The user whose session owns WirePlumber: whoever invoked sudo, else the
+  # owner of the running wireplumber process.
+  [ -n "${SUDO_USER:-}" ] && { echo "$SUDO_USER"; return; }
+  ps -o user= -C wireplumber 2>/dev/null | head -1
+}
+
+as_user_systemctl() {
+  local u="$1"; shift
+  local uid; uid=$(id -u "$u" 2>/dev/null) || return 1
+  runuser -u "$u" -- env XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user "$@" >/dev/null 2>&1
+}
+
+WP_STOPPED=""
+unload_module() { modprobe -r "$MOD" 2>/dev/null; }
+
 say "Reloading the driver"
 if lsmod | grep -q "^$MOD"; then
-  if ! modprobe -r "$MOD" 2>/dev/null; then
-    bad "The driver is stuck and won't unload."
-    # After an IO timeout a process can freeze *inside* the driver (state D),
-    # holding it open against any signal. Nothing short of a reboot frees that.
-    if ps -eo stat= | grep -q '^D'; then
-      info "A process is frozen inside the driver (normal after an IO timeout)."
-    else
-      info "Something is still using the camera."
+  if ! unload_module; then
+    user=$(desktop_user)
+    if [ -n "$user" ] && as_user_systemctl "$user" stop wireplumber; then
+      info "stopped WirePlumber (it holds the camera); retrying"
+      WP_STOPPED="$user"
+      sleep 2
     fi
+  fi
+
+  if ! lsmod | grep -q "^$MOD"; then
+    : # already gone
+  elif ! unload_module; then
+    bad "The driver is stuck and won't unload."
+    # A task frozen inside the driver (state D) cannot be signalled, and holds
+    # the module against any unload. Only a reboot clears that.
+    if ps -eo stat= | grep -q '^D'; then
+      info "A process is frozen inside the driver — a reboot is the only fix."
+    else
+      info "Something still holds the camera that stopping WirePlumber did not free."
+    fi
+    [ -n "$WP_STOPPED" ] && as_user_systemctl "$WP_STOPPED" start wireplumber
     info "A reboot clears this cleanly:   sudo reboot"
     exit 1
   fi
@@ -62,6 +97,12 @@ fi
 modprobe "$MOD" || { bad "Could not load $MOD. Check:  dkms status $MOD"; exit 1; }
 sleep 1
 ok "driver reloaded"
+
+# Bring audio back up if we took it down to free the module.
+if [ -n "$WP_STOPPED" ]; then
+  as_user_systemctl "$WP_STOPPED" start wireplumber && ok "WirePlumber restarted" \
+    || warn "could not restart WirePlumber — log out and back in if sound is missing"
+fi
 
 say "Result"
 node=$(ls /dev/video* 2>/dev/null | head -1)
