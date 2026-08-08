@@ -105,6 +105,32 @@ source-tree name mismatch.
 Washed-out or dark output is this driver's known-weak auto-exposure, not a
 failed install.
 
+## `fix-camera.sh`
+
+One-command recovery for when the camera stops delivering video. `facetimehd`
+wedges if two apps open the camera at once — sometimes on a single grab — and
+the kernel starts logging `facetimehd 0000:02:00.0: IO: timeout`. Every camera
+app then errors, and a process can freeze in state `D` *inside* the driver,
+holding it open so `modprobe -r` fails with "in use". Nothing short of
+reloading the driver clears it.
+
+The script closes the camera apps (Zoom, Cheese, OBS, guvcview), reloads
+`facetimehd`, and reports the fresh node. It re-execs itself under `sudo`, so a
+non-technical user just runs `fix-camera` and enters a password — no arguments,
+no driver knowledge. When a process is truly frozen in the driver (the case a
+reload cannot fix), it says so and points at `sudo reboot` rather than failing
+silently.
+
+Install it as a plain command so it is reachable from any terminal:
+
+```sh
+sudo install -m 755 fix-camera.sh /usr/local/bin/fix-camera
+```
+
+The wedge is provoked by two apps touching the camera simultaneously, so the
+standing rule — which the script reprints on success — is **one camera app at a
+time**: close Cheese before joining a call, close Zoom before opening OBS.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift
