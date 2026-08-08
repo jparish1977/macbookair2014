@@ -75,7 +75,9 @@ case "$ATTR" in /sys/*) ;; *) die "$ATTR is not under /sys" ;; esac
 
 BT=$(mktemp /tmp/who-writes-XXXXXX.bt)
 OUT=$(mktemp /tmp/who-writes-XXXXXX.txt)
-cleanup() { [[ -n "${BTPID:-}" ]] && kill "$BTPID" 2>/dev/null; rm -f "$BT"; }
+# Both temp files go, including the raw trace: it is printed in full above, and
+# leaving root-owned droppings in /tmp after every run is its own small mess.
+cleanup() { [[ -n "${BTPID:-}" ]] && kill "$BTPID" 2>/dev/null; rm -f "$BT" "$OUT"; }
 trap cleanup EXIT
 
 # kernfs_fop_write_iter is the single funnel every sysfs write goes through, so
