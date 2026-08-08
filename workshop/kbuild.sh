@@ -160,6 +160,13 @@ elapsed=$((SECONDS - start))
 mv "$WS"/linux-image-*.deb "$WS"/linux-headers-*.deb "$WS"/linux-libc-dev*.deb "$OUTDIR/" 2>/dev/null
 mv "$WS"/*.buildinfo "$WS"/*.changes "$OUTDIR/" 2>/dev/null
 
+# An address the target can actually reach. `hostname` is wrong here often
+# enough to matter: this host's own name resolves only on its LAN, so a printed
+# `scp iteration8:...` fails from anywhere else -- which is exactly where you
+# are when fetching a kernel for a laptop you carried somewhere.
+HOSTHINT=$(tailscale ip -4 2>/dev/null | head -1)
+[[ -z "$HOSTHINT" ]] && HOSTHINT=$(hostname)
+
 echo
 echo "================================================================"
 echo "  built $DESC for '$TARGET' in $((elapsed / 60))m $((elapsed % 60))s"
@@ -170,7 +177,7 @@ cat <<EOF
   Install on the target -- READ README.md FIRST if that machine has no
   ethernet, because a self-built kernel will not have its DKMS modules:
 
-    scp $(hostname):$OUTDIR/linux-image-*.deb .
+    scp $HOSTHINT:$OUTDIR/linux-image-*.deb .
     sudo dpkg -i linux-image-*.deb
     sudo update-grub
     # reboot AT THE KEYBOARD and pick the new entry; the old kernels stay

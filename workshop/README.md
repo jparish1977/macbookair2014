@@ -111,6 +111,25 @@ before rebooting, especially if the version sorts above the distro's.
    not exercising some hardware at that moment, that driver is gone. If a
    trimmed kernel misbehaves, rebuild with `--full` before suspecting anything
    else.
+
+   A real example from the first `mba` build: the laptop had `videobuf2-*`
+   loaded, but only because the out-of-tree `facetimehd` pulled them in. Trimming
+   kept `MEDIA_SUPPORT=m` and dropped `VIDEOBUF2_CORE`, so on that kernel the
+   `facetimehd` DKMS build would fail for want of a dependency that the trim had
+   no reason to keep. **Out-of-tree modules make `--trim` lie about what the
+   machine needs**, because their dependencies look like idle drivers. If a
+   target has DKMS modules, expect to want `--full`.
+
+   Checking a package before trusting it:
+
+       dpkg-deb -c linux-image-*.deb | grep '\.ko' > mods.txt
+       # module FILES use dashes; config symbols use underscores. Searching
+       # for snd_hda_intel.ko finds nothing while snd-hda-intel.ko is right there.
+       grep -E '/(ahci|applesmc|snd-hda-intel)\.ko' mods.txt
+
+   And check `config-used` in the build directory for anything `=y`: built-in
+   drivers are absent from the module list and that is correct, not a gap.
+   `EXT4_FS=y` and `USB_XHCI_PCI=y` both looked alarming until checked.
 4. **Stale tree.** `git -C linux fetch --tags` if a ref is not found.
 
 ## Targets that are not x86-64
