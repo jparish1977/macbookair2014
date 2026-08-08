@@ -74,12 +74,45 @@ carries patches for kernels 6.15, 6.16 and 6.17 — LP#2120508. Those fix
 which no source patch reaches. Do not assume the distro update retires the
 bypass.
 
-## Suspected flakiness — open, not established
+## The lockup trigger — corroborated 2026-08-08
 
-Recollection is that Wi-Fi has locked up under "too many requests at once".
-This is **not yet corroborated**, and the camera investigation is a caution
-against trusting a remembered trigger: the analogous "two camera apps at once"
-belief was tested and proved wrong.
+Earlier notes here called "too many requests at once" an uncorroborated
+recollection. **It is corroborated.** The batocera-watch project recorded it in
+`CLAUDE.md` as an architecture constraint at the time it happened:
+
+> **Never fan out unbounded concurrent connections.** The dev machine's Broadcom
+> `wl` driver hard-locks the whole laptop on connection bursts; a /24 sweep
+> opening 254 sockets froze it. Cap batches at ~24.
+
+Three details in that matter more than the confirmation itself:
+
+- **The trigger is concurrent connection count, not throughput.** A /24 sweep is
+  trivial traffic; what killed it was 254 sockets opening at once. Bulk transfers
+  have never done this.
+- **The symptom is a whole-machine hard lock**, not Wi-Fi dropping. That fits the
+  panic history above and explains why the journal is useless afterwards — the
+  machine never gets to flush anything.
+- **A mitigation has been in place ever since:** batches capped at ~24. That is
+  why the fault has not been seen lately.
+
+### This confounds the power-save experiment
+
+Power save was turned off on 2026-08-08 to see whether the flakiness recurs. It
+almost certainly will not — but **not because power save was the cause**. The
+known trigger is avoided by a cap that has been in the batocera code the whole
+time. Absence of lockups therefore says nothing either way, and it would be
+easy to wrongly credit the power-save change months from now.
+
+To actually settle it, the trigger has to be applied deliberately: escalate
+concurrent connection counts (24, 48, 96, 254) with power save off and see
+whether it still locks. If it survives 254 with power save off and reliably dies
+with it on, power save was the cause. If it dies either way, the cap is the only
+real defence and belongs everywhere, not just in batocera-watch.
+
+**That test hard-locks the machine when it works.** Nothing flushes to disk, so
+run it with no unsaved work, expect an unclean shutdown, and remember this
+machine has no Timeshift snapshots. Not something to do casually — but it is the
+only way to convert a documented anecdote into a rule.
 
 What the evidence shows as of 2026-08-08:
 
@@ -101,6 +134,11 @@ machine powered off and the next start is legitimately a new boot. They are not
 crash signatures, and an unclean-shutdown scan will wrongly flag them.
 
 ### Power save disabled as a test, 2026-08-08
+
+**Read the confounder above before drawing any conclusion from this.** The real
+trigger turned out to be documented — bursts of concurrent connections — and it
+is already avoided by a cap in the batocera code, so "no lockups since" cannot
+be credited to this change.
 
 `Power save: on` was the leading suspect, so it was turned off to see whether
 the flakiness recurs. Ubuntu ships `wifi.powersave = 3` in
