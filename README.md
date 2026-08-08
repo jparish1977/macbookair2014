@@ -620,6 +620,44 @@ Only the *trigger* needs root, and only once.
 Same model, same driver, same default trigger — see the pending list outside
 this repo. `kbd-backlight.sh install` is all it needs.
 
+## `apt-rollback.sh`
+
+Undo a bad apt transaction precisely, using evidence apt already keeps.
+
+    ./apt-rollback.sh list [N]     recent transactions, newest first
+    ./apt-rollback.sh show ID      every package one transaction changed
+    ./apt-rollback.sh revert ID    the command that undoes it (--run to execute)
+
+`/var/log/apt/history.log` records every transaction with the old *and* new
+version of everything it touched, and rotated logs go back further — 76
+transactions to late July on this machine. `/var/cache/apt/archives` often still
+holds the .deb. So "undo that update" is answerable for free, and it puts back
+exactly what changed instead of rolling the whole system back to Tuesday.
+
+This exists **instead of Timeshift**, which was considered and declined for this
+job. A first snapshot is ~21G against 54G free, and the machine's genuinely
+dangerous updates — kernels — are already covered better by held fallbacks, the
+GRUB menu and `kernel-guard.sh`. Snapshots remain the right tool for the other
+case: something broke, you do not know what changed, or the damage is outside
+dpkg. This tool says so rather than pretending otherwise.
+
+It prints commands and stops. `--run` simulates, shows the plan, and asks.
+
+### Two things testing it caught
+
+**Version strings are not regexes.** The availability check used awk's `$2 ~ v`,
+so `30.0.2+dfsg-3build1` was matched as a pattern where `+` is a quantifier — it
+never matches the string it came from. The tool confidently reported "NOT
+AVAILABLE — a snapshot would be the only route" for a package sitting in
+`noble/universe`. Now compared literally.
+
+**It contradicted its own warning.** For a kernel transaction it printed "do not
+revert these with apt", then printed a command removing
+`linux-image-7.0.0-28-generic` — the running kernel, on a laptop with no
+Ethernet. Advice followed by the means to ignore it is worse than silence.
+Kernel packages are now filtered out of every generated command and listed
+separately as deliberately omitted.
+
 ## `sysfs-watch.sh` and `who-writes.sh`
 
 Two general tools that came out of the keyboard backlight hunt above, kept
