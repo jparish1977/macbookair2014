@@ -376,6 +376,24 @@ Every command that touches the driver runs under `timeout`, because a wedged
 writing its file is worse than useless. Output goes to `~/wifi-snapshots/` and
 is `sync`ed, on the assumption the machine may not survive much longer.
 
+`wifi-snapshot.desktop` puts it a click away, which matters for a tool whose
+whole value depends on being run *during* the fault rather than remembered
+afterwards:
+
+```sh
+sudo install -m 755 wifi-snapshot.sh /usr/local/bin/wifi-snapshot
+sudo desktop-file-install wifi-snapshot.desktop
+cp wifi-snapshot.desktop ~/Desktop/ && chmod +x ~/Desktop/wifi-snapshot.desktop
+```
+
+It runs in a terminal because the verdict is the point, and holds the window
+open so it can be read. The icon is `network-error` rather than
+`network-wireless` — you will be looking for it while annoyed and possibly with
+a dead link, and the broken-network glyph is easier to pick out. Running it
+needs no root, so nothing prompts for a password mid-fault; only installing
+does. On Cinnamon the desktop copy needs a one-time right-click →
+**Allow Launching**.
+
 ## `crash-report.sh`
 
 Reads the crash reports `mintreport-tray` nags about.

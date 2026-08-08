@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Capture Wi-Fi Problem
+Comment=Record what the Wi-Fi is doing right now, before rebooting
+# Terminal=true because the verdict is the point — it says whether the driver
+# is wedged, the association failed, or the fault is somewhere above both. The
+# trailing read holds the window open so that verdict can actually be read;
+# without it the window closes the instant the capture finishes.
+#
+# Assumes wifi-snapshot is on PATH:
+#   sudo install -m 755 wifi-snapshot.sh /usr/local/bin/wifi-snapshot
+Exec=bash -c "wifi-snapshot; echo; read -n1 -s -r -p 'Press any key to close this window.'"
+Icon=network-error
+Terminal=true
+Categories=Utility;
+Keywords=wifi;wireless;network;broadcom;wl;capture;diagnostic;frozen;
+StartupNotify=false
