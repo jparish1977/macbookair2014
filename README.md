@@ -317,6 +317,56 @@ root patches at any version — so SIP stays on and updates need no re-patching.
 The only real obstacle is the 4GB of soldered RAM. Kept so the question stays
 answered.
 
+## Prior art, and claims checked against this machine
+
+Other write-ups for this hardware. Each one's advice was tested here rather than
+repeated, because most of it is copied between guides without being re-checked.
+
+| Source | Scope |
+| --- | --- |
+| [BrBorghi/linux-mint-22-macbook-air-2014-guide](https://github.com/BrBorghi/linux-mint-22-macbook-air-2014-guide) | Closest match — 2014 Air on Mint 22, prose steps. Also covers non-US keyboard layout and AirPods, which this repo does not. |
+| [hsnuc09/bcm4360-fix](https://github.com/hsnuc09/bcm4360-fix) | BCM4360 only, on the kernel 6.17 build failure. |
+| [jamieede123/macbookair6-1-mint-tweaks](https://github.com/jamieede123/macbookair6-1-mint-tweaks) | Battery/performance on the 11" **6,1**, same 4GB and distro. |
+| [Debian wiki: MacBookAir 6-2](https://wiki.debian.org/InstallingDebianOn/Apple/MacBookAir/6-2) / [6-1](https://wiki.debian.org/InstallingDebianOn/Apple/MacBookAir/6-1) | Per-component reference tables. |
+| [patjak/facetimehd](https://github.com/patjak/facetimehd) | The camera driver itself. |
+
+### Checked, and not needed here
+
+- **`intel_iommu=off`** — presented as a required boot parameter for this model.
+  This machine has never set it (`/proc/cmdline` is just `quiet splash`) and the
+  camera works, so it is not a prerequisite. It may still matter on a 6,1.
+- **`sudo apt install facetimehd-dkms facetimehd-firmware`** — offered as the
+  easy alternative to building the driver. **Those packages do not exist in
+  Ubuntu 24.04 or Mint 22** (`apt-cache search facetimehd` returns nothing);
+  they are Debian-only. Following that advice leaves you with no camera and no
+  error explaining why, which is the reason `mba-webcam.sh` exists.
+- **`mem_sleep_default=deep`** — recommended to stop overnight battery drain.
+  Already the default here: `/sys/power/mem_sleep` reads `s2idle [deep]`, so the
+  parameter changes nothing on this kernel.
+- **Switching the trackpad to `xserver-xorg-input-synaptics`** — the Debian wiki
+  rates the trackpad as working out of the box with taps, two-finger scroll and
+  tap-to-drag, which matches this machine under libinput.
+
+### Checked, and worth knowing
+
+- **`acpi_osi=!Darwin` is the one real gap.** This machine exposes only
+  `acpi_video0` with `max_brightness=100`; there is no `intel_backlight`. Two
+  independent sources say that parameter exposes the finer `intel_backlight`
+  range, and the Debian wiki separately recommends it for slow display wake from
+  sleep. Not applied here — it is a GRUB change on a machine where display and
+  boot are the things you least want to break, so it is recorded as an option
+  rather than done silently.
+- **The shipped Broadcom driver now carries its own kernel fixes.**
+  `broadcom-sta-dkms 6.30.223.271-23ubuntu1.2` is in `noble-updates/restricted`
+  (no `-proposed` needed) and its changelog lists patches for kernel 6.15, 6.16
+  and 6.17, including `42-broadcom-wl-fix-linux-6.17.patch` (LP #2120508).
+  **This is not the same bug** as the objtool rejection this repo works around
+  (LP #2161038, kernel 7.x), and the `objtool=/bin/true` line is still present
+  in `dkms.conf` here. Do not assume the distro fix retires it — verify against
+  a 7.x kernel first, with a known-good kernel to fall back to.
+- **AirPods need `ControllerMode = bredr`** in `/etc/bluetooth/main.conf`. Not
+  tested here, recorded because it is a real and non-obvious workaround.
+
 ## License
 
 Released into the public domain under [the Unlicense](LICENSE). No conditions,
