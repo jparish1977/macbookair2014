@@ -29,6 +29,11 @@ all, including no way to fetch the fix. Two modes:
 sudo ./mba-wifi.sh help
 ```
 
+[**WIFI.md**](WIFI.md) has the history this script exists because of — the
+2026-07-21 kernel panic, the 7.x trial, why the objtool bypass is scoped rather
+than global, and what is known versus merely suspected about the flakiness.
+Worth reading before changing anything here.
+
 ## `mba-webcam.sh`
 
 Gets the FaceTime HD camera working.
