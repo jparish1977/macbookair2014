@@ -376,9 +376,29 @@ repeated, because most of it is copied between guides without being re-checked.
   (no `-proposed` needed) and its changelog lists patches for kernel 6.15, 6.16
   and 6.17, including `42-broadcom-wl-fix-linux-6.17.patch` (LP #2120508).
   **This is not the same bug** as the objtool rejection this repo works around
-  (LP #2161038, kernel 7.x), and the `objtool=/bin/true` line is still present
-  in `dkms.conf` here. Do not assume the distro fix retires it — verify against
-  a 7.x kernel first, with a known-good kernel to fall back to.
+  (LP #2161038, kernel 7.x). Those patches fix *source-level* API breaks;
+  objtool is rejecting Broadcom's precompiled blob, which no source patch
+  reaches. Tested directly, with the bypass removed, on `23ubuntu1.2`:
+
+  | Kernel | Build with objtool enabled |
+  | --- | --- |
+  | 6.17.0-41 | clean — `wl.ko` produced |
+  | 7.0.0-28 | `wl.o: error: objtool: aes_cbc_encrypt_pad+0x4c: unannotated intra-function call` |
+
+  So the bypass is still required, and only on 7.x. `mba-wifi.sh` therefore
+  scopes it rather than applying it to every build:
+
+  ```sh
+  MAKE[0]="make KVER=$kernelver $([ "${kernelver%%.*}" -ge 7 ] 2>/dev/null && echo objtool=/bin/true)"
+  ```
+
+  `dkms.conf` is sourced as shell with `$kernelver` set, so this is evaluated per
+  build. If `kernelver` is ever unset the test fails, stderr is discarded, `&&`
+  short-circuits and `MAKE[0]` comes out clean — failing toward a loud 7.x build
+  error rather than a silently unvalidated 6.x module.
+
+  `6.30.223.271-29ubuntu1` is reported to fix 7.x properly, but it is not in
+  noble — `apt-cache madison` offers only `23ubuntu1` and `23ubuntu1.2`.
 - **AirPods need `ControllerMode = bredr`** in `/etc/bluetooth/main.conf`. Not
   tested here, recorded because it is a real and non-obvious workaround.
 

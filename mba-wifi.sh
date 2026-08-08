@@ -258,10 +258,13 @@ cmd_status() {
 
   say "dkms.conf integrity"
   if [ -f "$DKMS_CONF" ]; then
-    if grep -q 'objtool=/bin/true' "$DKMS_CONF" 2>/dev/null; then
-      bad "objtool bypass is ACTIVE in dkms.conf"
-      info "This affects EVERY future build, including working 6.x kernels."
-      info "Run 'trial-revert' to undo it."
+    if grep -q 'kernelver%%.\*.*objtool=/bin/true' "$DKMS_CONF" 2>/dev/null; then
+      ok "objtool bypass present, scoped to 7.x — 6.x builds stay validated"
+      info "Run 'trial-revert' from a 6.x kernel to remove it entirely."
+    elif grep -q 'objtool=/bin/true' "$DKMS_CONF" 2>/dev/null; then
+      bad "objtool bypass is ACTIVE for EVERY kernel (unscoped)"
+      info "6.x builds clean without it, so this gives up a real check for free."
+      info "Re-run 'trial-arm', or edit MAKE[0] to the 7.x-scoped form."
     else
       ok "no objtool bypass — builds are validated normally"
     fi
@@ -546,8 +549,8 @@ cmd_trial_arm() {
     You are about to:
       - lift the 7.x apt block
       - install a 7.x kernel
-      - patch dkms.conf with objtool=/bin/true (a GLOBAL change affecting
-        every future build, including your working 6.x kernels)
+      - patch dkms.conf to pass objtool=/bin/true on 7.x kernels only
+        (6.x keeps full objtool checking — it builds clean without it)
       - blacklist wl at boot so the first 7.x boot cannot auto-load it
 
     Known risk: the driver may build and then panic the kernel on load.
@@ -580,12 +583,22 @@ EOF
   # 2. Patch dkms.conf, keeping a pristine copy.
   [ -f "$DKMS_CONF" ] || die "$DKMS_CONF not found — is broadcom-sta-dkms installed?"
   [ -f "$DKMS_BACKUP" ] || run cp -a "$DKMS_CONF" "$DKMS_BACKUP"
+  # The bypass is scoped to 7.x rather than applied unconditionally. Tested on
+  # this hardware with broadcom-sta 6.30.223.271-23ubuntu1.2: 6.17 builds clean
+  # with objtool enabled, 7.0 fails with
+  #   wl.o: error: objtool: aes_cbc_encrypt_pad+0x4c: unannotated intra-function call
+  # so blanket-disabling it would give up a real check on the kernels that pass.
+  #
+  # dkms.conf is sourced as shell with $kernelver set, so the test runs per
+  # build. If kernelver is ever unset the [ ] fails, stderr is discarded, && short
+  # circuits, and MAKE[0] comes out clean — the safe direction: a 7.x build then
+  # fails loudly at build time rather than a 6.x module shipping unchecked.
   if grep -q 'objtool=/bin/true' "$DKMS_CONF"; then
     ok "objtool bypass already present"
   else
-    run sed -i 's|^\(MAKE\[0\]="make KVER=\$kernelver\)"|\1 objtool=/bin/true"|' "$DKMS_CONF"
+    run sed -i 's|^\(MAKE\[0\]="make KVER=\$kernelver\)"|\1 $([ "${kernelver%%.*}" -ge 7 ] 2>/dev/null \&\& echo objtool=/bin/true)"|' "$DKMS_CONF"
     grep -q 'objtool=/bin/true' "$DKMS_CONF" \
-      && ok "patched dkms.conf (pristine copy at $DKMS_BACKUP)" \
+      && ok "patched dkms.conf, 7.x only (pristine copy at $DKMS_BACKUP)" \
       || warn "could not patch dkms.conf automatically — edit MAKE[0] by hand"
   fi
 
@@ -706,8 +719,8 @@ cmd_trial_accept() {
     You are about to keep 7.x. That means:
       - wl un-blacklisted, so the NEXT BOOT auto-loads it. That is the path
         that panicked before; trial-test only proved a manual load is safe.
-      - objtool=/bin/true stays in dkms.conf PERMANENTLY, for every kernel
-        including the 6.x fallbacks. Builds are no longer validated.
+      - the dkms.conf patch stays PERMANENTLY. It passes objtool=/bin/true on
+        7.x only, so 6.x fallback builds are still validated normally.
       - the 7.x apt block stays lifted, so future 7.x point releases arrive
         on their own and rebuild wl unattended. Each one is a fresh gamble.
 
@@ -754,9 +767,11 @@ EOF
   fi
 
   # broadcom-sta-dkms too. Holding the kernels is not enough: a broadcom-sta-dkms
-  # update rebuilds wl for EVERY installed kernel, which would quietly replace the
-  # clean 6.x fallback modules with ones built through the objtool bypass. The
-  # fallback is only worth holding if it stays the module that was known to work.
+  # update rebuilds wl for EVERY installed kernel, replacing the 6.x fallback
+  # modules with freshly built ones. Since the bypass is scoped to 7.x those
+  # rebuilds are still objtool-validated, but they are no longer the exact
+  # binaries that were proven to work — and the fallback is only worth holding
+  # if it stays the module that was known good.
   holds="$sixx"
   if pkg_installed broadcom-sta-dkms; then
     holds="${holds}broadcom-sta-dkms "
@@ -818,7 +833,10 @@ cmd_trial_revert() {
   if [ -f "$DKMS_BACKUP" ]; then
     run cp -a "$DKMS_BACKUP" "$DKMS_CONF" && ok "dkms.conf restored from $DKMS_BACKUP"
   elif [ -f "$DKMS_CONF" ] && grep -q 'objtool=/bin/true' "$DKMS_CONF"; then
-    run sed -i 's| objtool=/bin/true||' "$DKMS_CONF" && ok "objtool bypass removed from dkms.conf"
+    # Strip everything between $kernelver and the closing quote, so this works
+    # against both the old unconditional bypass and the 7.x-scoped expression.
+    run sed -i 's|^\(MAKE\[0\]="make KVER=\$kernelver\).*"|\1"|' "$DKMS_CONF" \
+      && ok "objtool bypass removed from dkms.conf"
   else
     ok "dkms.conf clean"
   fi
