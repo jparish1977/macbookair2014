@@ -349,13 +349,28 @@ repeated, because most of it is copied between guides without being re-checked.
 
 ### Checked, and worth knowing
 
-- **`acpi_osi=!Darwin` is the one real gap.** This machine exposes only
-  `acpi_video0` with `max_brightness=100`; there is no `intel_backlight`. Two
-  independent sources say that parameter exposes the finer `intel_backlight`
-  range, and the Debian wiki separately recommends it for slow display wake from
-  sleep. Not applied here — it is a GRUB change on a machine where display and
-  boot are the things you least want to break, so it is recorded as an option
-  rather than done silently.
+- **`acpi_osi=!Darwin` was the one real gap, and it is now applied here.**
+  Before, the only backlight interface was `acpi_video0` with
+  `max_brightness=100`. After adding the parameter, `acpi_video0` is gone and
+  `intel_backlight` appears with `max_brightness=2777` — about 27× finer, and
+  the brightness keys drive it. The Debian wiki also credits it for slow display
+  wake from sleep.
+
+  ```sh
+  sudo cp /etc/default/grub /etc/default/grub.bak.$(date +%s)
+  # single quotes matter: ! is history expansion in interactive bash
+  sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash acpi_osi=!Darwin"/' /etc/default/grub
+  sudo update-grub
+  ```
+
+  It is still a boot-path change on a machine whose display and Wi-Fi you least
+  want to break, so keep the backup. If the display misbehaves, press `e` at the
+  GRUB menu, delete `acpi_osi=!Darwin` from the `linux` line and `Ctrl-X` to boot
+  once without it; restore the backup and `update-grub` to make that permanent.
+
+  Verified after the change, on **kernel 7.0.0-28** — the riskiest combination
+  here, since that is where `wl` is most fragile: Wi-Fi associated with v4 and v6
+  addresses, and the camera up on `/dev/video0` with zero `IO: timeout`.
 - **The shipped Broadcom driver now carries its own kernel fixes.**
   `broadcom-sta-dkms 6.30.223.271-23ubuntu1.2` is in `noble-updates/restricted`
   (no `-proposed` needed) and its changelog lists patches for kernel 6.15, 6.16
