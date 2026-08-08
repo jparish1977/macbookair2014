@@ -330,6 +330,52 @@ which is a poor way to test a guard against losing Wi-Fi.
 
 `remove-hook` undoes it and removes the installed copy.
 
+## `wifi-snapshot.sh`
+
+Captures the state of the Wi-Fi stack **while it is misbehaving**, before the
+reboot that destroys the evidence.
+
+```sh
+./wifi-snapshot.sh          # no arguments, no sudo needed
+```
+
+`wl` is a binary blob, and when it fails there is often nothing useful in the
+logs afterwards — the 2026-07 panics flushed nothing at all. So the evidence has
+to be collected during the fault.
+
+**It does not just dump state, it probes.** A static dump cannot tell an idle
+driver from a wedged one; both look identical. So it asks the driver an nl80211
+question and pushes packets at the default gateway, then checks whether frames
+actually left the interface. The verdict distinguishes:
+
+| Finding | Meaning |
+| --- | --- |
+| control path did not answer in 6s | strongest wedge signal — driver gone, not just the link |
+| answered, but not associated | association failure, not a wedged blob |
+| associated, but no frames left | the interesting failure — a dump would have looked idle |
+| frames left, no replies | link alive, far end or association stale |
+| replies received | driver is fine; look above it (DNS, routing) |
+
+Three things learned building it, all of which would have produced wrong
+answers:
+
+- **Interrupt counts are useless here.** This BCM4360 has no MSI vector
+  (`/sys/bus/pci/devices/*/msi_irqs` is empty), so it shares a legacy line with
+  `i801_smbus` — the count keeps rising whether or not `wl` is alive. Reported,
+  but explicitly discounted.
+- **`iw dev link` exits 255 when unprivileged**, printing the association
+  correctly and then failing on the signal/bitrate part that needs root. Judging
+  it by exit status reports a healthy driver as wedged.
+- **One ping burst is not evidence.** The script was seen flipping between
+  "wedged" and "healthy" on consecutive runs against a working link, so the
+  transmit test now has to fail twice before it is believed. Six consecutive
+  runs now give an identical verdict.
+
+Every command that touches the driver runs under `timeout`, because a wedged
+`wl` can block an nl80211 query forever and a diagnostic that hangs instead of
+writing its file is worse than useless. Output goes to `~/wifi-snapshots/` and
+is `sync`ed, on the assumption the machine may not survive much longer.
+
 ## `crash-report.sh`
 
 Reads the crash reports `mintreport-tray` nags about.

@@ -135,3 +135,16 @@ logs can produce no evidence at all. Any real attempt needs out-of-band capture
 (netconsole to another machine, or a synchronous log written with `fsync`), a
 known-good fallback kernel to boot into, and a way back online that does not
 depend on `wl`.
+
+## Capturing a fault when it happens
+
+`wifi-snapshot.sh` exists because the evidence has to be collected *during* the
+fault — see the panic history above for why a post-mortem log read can come back
+empty. Run it the moment Wi-Fi misbehaves and before rebooting; it writes a
+timestamped capture to `~/wifi-snapshots/` and prints a verdict distinguishing a
+wedged driver from an association failure from a problem above the driver.
+
+The README documents the three false-answer traps found while building it: the
+shared IRQ line that makes interrupt counts meaningless on this device, `iw dev
+link` exiting 255 when unprivileged despite working, and single-ping-burst
+verdicts that were not reproducible run to run.
