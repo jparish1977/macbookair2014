@@ -498,6 +498,128 @@ root patches at any version — so SIP stays on and updates need no re-patching.
 The only real obstacle is the 4GB of soldered RAM. Kept so the question stays
 answered.
 
+## `kbd-backlight.sh`
+
+The keyboard backlight went dark "as soon as I log in". Nothing was turning it
+off. The `applesmc` driver ships the backlight bound to an **LED activity
+trigger**, and what looked like a switch-off was the end of a blink.
+
+`drivers/hwmon/applesmc.c`, unchanged upstream:
+
+```c
+static struct led_classdev applesmc_backlight = {
+        .name             = "smc::kbd_backlight",
+        .default_trigger  = "nand-disk",
+        .brightness_set   = applesmc_brightness_set,
+};
+```
+
+So `/sys/class/leds/smc::kbd_backlight/trigger` reads `[nand-disk]` from boot,
+and `led_timer_function` ends each blink by writing 0.
+
+**This is not an SSD activity light, despite how it reads.** `nand-disk` is
+fired by the MTD subsystem, and the SSD is not an MTD device:
+
+```
+/proc/mtd:  mtd0  00800000  "BIOS"        <- the 8MB EFI SPI flash, via spi_nor
+lsblk:      sda   113G  sata  APPLE SSD SD0128F
+```
+
+The only MTD device on this machine is the firmware flash chip. Ordinary disk
+I/O never fires this trigger. What does is a read of the BIOS flash — which
+happens about once per boot.
+
+That is the whole shape of the bug. `gnome-software` activates `fwupd` on the
+**first** login after boot, `fwupd`'s `mtd` plugin reads mtd0 during coldplug,
+the trigger fires once, and the blink leaves the LED at 0. It looked like a
+login event because that refresh happens once per boot — which is also why
+logging out and back in never reproduced it.
+
+### Was the trigger intended?
+
+Almost certainly not, though this is inference rather than a quote from the
+author. The evidence:
+
+- `.default_trigger = "nand-disk"` was already on the keyboard backlight before
+  the [January 2008 case-LED patch](https://lkml.rescloud.iu.edu/0801.3/1513.html),
+  so it dates from the original LED support.
+- That same patch added a *case* LED and, wanting real disk activity, gave it
+  `ide-disk` — the actual disk trigger of the era. Someone who meant disk
+  activity did not reach for `nand-disk`.
+- `nand-disk` is an MTD trigger. MacBooks of 2007 exposed no MTD device at all,
+  so on the hardware it was written for this trigger could never have fired.
+
+The likeliest reading is a wrong pick from the trigger list in 2007 that was
+harmless precisely because it was inert. It only became visible on this machine
+because two much later changes gave it a source of events: the kernel began
+exposing the Intel SPI flash as an MTD device, and `fwupd` began reading that
+flash at every startup. A dormant mistake, switched on a decade later by two
+unrelated projects.
+
+Detaching the trigger therefore costs nothing real. The behaviour being given
+up is "blink the keyboard when firmware flash is read", which nobody asked for
+and which fires once per boot.
+
+    sudo ./kbd-backlight.sh install    # detach the trigger, now and every boot
+    ./kbd-backlight.sh status          # trigger, level, is the rule installed
+    sudo ./kbd-backlight.sh test       # restart fwupd, check the level survives
+    sudo ./kbd-backlight.sh revert     # driver default back
+
+`install` writes `/etc/udev/rules.d/60-applesmc-kbd-backlight.rules`. The `60`
+matters: `99-systemd.rules` is what starts `systemd-backlight@` for this LED,
+and clearing a trigger sets the LED to 0, so the detach has to happen *before*
+the restore, not after.
+
+### How it was found, and four ways it was nearly missed
+
+Elimination failed repeatedly here; a kernel stack settled it in one shot.
+
+**The pid on the write is a lie.** The trace named `fwupd`:
+
+```
+applesmc_brightness_set  pid=37035  comm=fwupd  value=0
+        applesmc_brightness_set+1
+        led_timer_function+100      <-- the actual caller
+        call_timer_fn+46
+        run_timer_softirq+138
+        ...
+        vfs_read+388                <-- fwupd merely got interrupted here
+```
+
+This is a softirq. The pid is whatever was on the CPU when the timer fired.
+That name alone sent this chasing fwupd's 130 plugins. **In a softirq or
+interrupt stack, read the frames, not `comm`.**
+
+**A restore is not proof of survival.** An earlier session saw
+`systemd-backlight` restore 12, saw 24 later, and concluded something was
+zeroing the LED. There was never a zero — 12 → 24 is one press of the up key,
+the steps being 12 apart. That wrong inference framed the whole problem as
+"who writes the zero at login" and cost the most time of anything here.
+
+**A bisection that cannot prove its own intervention proves nothing.** Disabling
+fwupd's plugins via `DisabledPlugins=` reported "plugins ruled out" while the
+journal plainly showed `FuPluginUefiCapsule` and `FuPluginDfu` still loading —
+the config edit never took effect. A toggle-based bisect must verify the toggle
+applied before trusting a single round.
+
+**Root was never needed to write the LED.** The sysfs file is `root:root 0644`,
+which is why the earlier note here insisted any fix had to be a system unit.
+But UPower exposes the write on the system bus and it succeeds unprivileged
+from the active session:
+
+```
+gdbus call --system --dest org.freedesktop.UPower \
+  -o /org/freedesktop/UPower/KbdBacklight \
+  -m org.freedesktop.UPower.KbdBacklight.SetBrightness 204
+```
+
+Only the *trigger* needs root, and only once.
+
+### This affects Jenni's machine too
+
+Same model, same driver, same default trigger — see the pending list outside
+this repo. `kbd-backlight.sh install` is all it needs.
+
 ## Prior art, and claims checked against this machine
 
 Other write-ups for this hardware. Each one's advice was tested here rather than
