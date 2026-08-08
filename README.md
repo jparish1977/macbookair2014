@@ -7,6 +7,52 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 > run them. They are written for a specific machine and a specific distro; on
 > anything else, treat them as a reference rather than something to execute.
 
+## What is in here
+
+**Making the hardware work**
+
+| | |
+| --- | --- |
+| [`mba-wifi.sh`](#mba-wifish) | BCM4360 Wi-Fi via broadcom-sta, with the 7.x trial/revert structure |
+| [`mba-webcam.sh`](#mba-webcamsh) | FaceTime HD camera via facetimehd, per kernel |
+| [`fix-camera.sh`](#fix-camerash) | Recover the camera when it wedges (+ desktop launcher) |
+| [`kbd-backlight.sh`](#kbd-backlightsh) | Stop the keyboard backlight being used as a disk-activity light |
+| [`optimize-mba.sh`](#optimize-mbash) | zram, earlyoom, noatime, low-memory MySQL |
+| [`chromium-google-search.sh`](#chromium-google-searchsh) | Add Google as a search engine |
+
+**Not getting stranded**
+
+| | |
+| --- | --- |
+| [`kernel-guard.sh`](#kernel-guardsh) | Apt hook: warn *before* a reboot that would leave the machine with no Wi-Fi |
+| [`apt-rollback.sh`](#apt-rollbacksh) | Undo a bad apt transaction precisely, from apt's own records |
+
+**Working out what is actually wrong**
+
+| | |
+| --- | --- |
+| [`who-writes.sh`](#sysfs-watchsh-and-who-writessh) | Name what writes a sysfs attribute — or prove nothing in userspace does |
+| [`sysfs-watch.sh`](#sysfs-watchsh-and-who-writessh) | Log every change to a sysfs attribute, surviving logout or a reboot |
+| [`wifi-snapshot.sh`](#wifi-snapshotsh) | Capture Wi-Fi state *during* a fault (+ desktop launcher) |
+| [`crash-report.sh`](#crash-reportsh) | Read apport `.crash` files without the GUI |
+| [`module-patch-test.sh`](#module-patch-testsh) | Test a kernel module patch on the machine that has the bug, with a control |
+| `applesmc-patch-test.sh` | The purpose-built ancestor of the above; kept as the worked example |
+
+**Building kernels**
+
+| | |
+| --- | --- |
+| [`workshop/`](#workshop) | Kernel build and bisect host on iteration8 — has its own README |
+
+**Write-ups** — reasoning that is not recoverable from the scripts
+
+| | |
+| --- | --- |
+| [`WIFI.md`](#wifimd) | Why `mba-wifi.sh` is so defensive; the panic history; the lockup trigger |
+| [`SNAPSHOTS.md`](#snapshotsmd) | Why rollback here is apt-level rather than Timeshift, and what that leaves uncovered |
+| [`MACOS.md`](#macosmd) | Whether OpenCore can run newer macOS on this model |
+| [`patches/`](#patches) | The facetimehd fix in use, and the applesmc patch drafted for upstream |
+
 ## `mba-wifi.sh`
 
 Broadcom BCM4360 survival tool.
@@ -192,8 +238,16 @@ systemctl --user start wireplumber
 
 ## `patches/`
 
-Local patches against the pinned upstream driver, applied to
-`/usr/src/facetimehd-$VER` before the DKMS build.
+Two different things live here, and they are not the same kind of object.
+
+| | |
+| --- | --- |
+| `fthd-recover-from-firmware-timeout.patch` | **In use.** Applied to the local facetimehd source before the DKMS build. Described below. |
+| `upstream-applesmc-nand-disk.md` | **A submission package, not applied locally.** The one-line kernel patch for the keyboard backlight bug, with its evidence, its remaining gaps, and how to send it. Fully tested — including on a mainline kernel — and **not sent**. See [`kbd-backlight.sh`](#kbd-backlightsh) for the local fix, which is a udev rule. |
+
+The rest of this section is about the facetimehd patch. It is a local patch
+against the pinned upstream driver, applied to `/usr/src/facetimehd-$VER` before
+the DKMS build.
 
 `fthd-recover-from-firmware-timeout.patch` addresses upstream
 [issue #332](https://github.com/patjak/facetimehd/issues/332) — "one firmware
@@ -747,6 +801,56 @@ owned — for applesmc the LED drops to 0 — and the tool has no way to know wh
 of that you cared about. Restore it in `--teardown`, which deliberately runs
 *before* the stock module is loaded again, so anything acting on the module's
 add event (a udev rule, most likely) is back in place in time to apply.
+
+## `workshop/`
+
+A kernel build and bisect host, living on **iteration8** at
+`/srv/kernel-workshop`. It has [its own README](workshop/README.md), deployed to
+that machine as well so `cat /srv/kernel-workshop/README.md` after an ssh tells
+you everything.
+
+| | |
+| --- | --- |
+| `provision.sh` | Build the whole workshop from nothing on any Debian/Ubuntu host. Idempotent. |
+| `capture-target.sh` | **Run on the vintage machine.** Records its config, loaded modules, DKMS modules and interfaces. |
+| `kbuild.sh` | **Run on the build host.** Builds installable debs for a target profile at a git ref. |
+
+The setup is scripted rather than hand-built on purpose: reproducing it
+elsewhere — including in a VM — is `provision.sh` plus somewhere to run it.
+
+Two things it insists on, both learned the hard way and written up there in
+full: **the build happens on the fast machine and every verdict comes from the
+old one**, and **a test kernel outranks distro kernels in GRUB permanently**, so
+remove it once it has answered its question.
+
+Reach iteration8 by its **tailnet** name — the bare `iteration8` ssh alias
+points at a `.local` name that resolves only on its own LAN.
+
+## `WIFI.md`
+
+The history behind `mba-wifi.sh`: the July 2026 kernel panic that led to
+blocking 7.x, the trial that lifted it, why the objtool bypass exists and why it
+is scoped to 7.x, and what is known versus assumed about the lockups.
+
+Read it before touching Wi-Fi on this machine. It is kept because the reasoning
+is not recoverable from the scripts, and because a session that does not know
+the history reliably re-derives it wrongly — which has happened.
+
+The lockup trigger is now corroborated: **bursts of concurrent connections**, not
+throughput. A /24 sweep opening 254 sockets hard-locks the whole laptop; batches
+are capped at ~24 in the batocera-watch project as a result. That also confounds
+the power-save experiment currently running, which the file says plainly so
+nobody credits the wrong change months from now.
+
+## `SNAPSHOTS.md`
+
+Why rollback on this machine is `apt-rollback.sh` rather than Timeshift, with
+the measured numbers, and — more usefully — **what that decision leaves
+uncovered** and what to do if you revisit it.
+
+The short version: a snapshot on another host is unreachable in the exact
+scenario it was installed for, because the likeliest bad update here costs you
+the only network interface.
 
 ## Prior art, and claims checked against this machine
 
