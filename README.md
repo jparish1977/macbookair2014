@@ -247,6 +247,47 @@ whether a future wedge recovers on its own. Upstream is also explicit that this
 addresses the driver's inability to *recover* from a timeout, not the reason the
 firmware times out.
 
+## `kernel-guard.sh`
+
+Stops a kernel landing quietly without its out-of-tree drivers.
+
+With no apt pin, 7.x point releases arrive unattended and DKMS rebuilds `wl` and
+`facetimehd` for each one. When that build fails, DKMS does say so — in the
+middle of hundreds of lines of `apt upgrade` output, where it is trivially
+missed. The consequence appears one reboot later, as a machine with no `wl`, no
+Ethernet port, and therefore no way to fetch the fix.
+
+The check has to happen at upgrade time, while the machine is still online and
+the working kernel is still running. That is what the apt hook is for:
+
+```sh
+./kernel-guard.sh check            # report every installed kernel
+sudo ./kernel-guard.sh install-hook
+```
+
+Afterwards every apt operation ends with a driver check that prints **nothing**
+when all is well, and this when it is not:
+
+```
+  ###################################################################
+  #  DO NOT REBOOT YET                                              #
+  #  The newest kernel has no wl module. This machine has no        #
+  #  Ethernet port, so booting it means no network at all.          #
+  #    sudo dkms autoinstall -k 7.0.0-28-generic                    #
+  ###################################################################
+```
+
+Exit codes are `0` fine, `1` a non-critical gap (camera only), `2` the newest
+kernel has no `wl`. It distinguishes the two deliberately: a missing camera is
+an inconvenience, a missing `wl` strands the machine, and only the second is
+worth shouting about.
+
+The hook ends in `|| true`, which is load-bearing rather than sloppy: apt aborts
+the run on a failing hook, and breaking apt on a machine whose recovery path
+*is* apt would be a worse failure than the one being guarded against.
+
+`remove-hook` undoes it and removes the installed copy.
+
 ## `crash-report.sh`
 
 Reads the crash reports `mintreport-tray` nags about.
