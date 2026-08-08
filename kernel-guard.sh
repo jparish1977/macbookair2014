@@ -31,6 +31,7 @@ OPTIONAL_MOD=facetimehd
 
 DRY_RUN=0
 QUIET=0
+NOTIFY=0
 
 say()  { [ "$QUIET" -eq 1 ] || printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { [ "$QUIET" -eq 1 ] || printf '    \033[32m[ok]\033[0m   %s\n' "$*"; }
@@ -70,6 +71,34 @@ dkms_built_for() {
 }
 
 has_headers() { [ -d "/lib/modules/$1/build" ]; }
+
+# On a machine whose updates run through Mint's Update Manager rather than a
+# terminal, hook output lands in a details pane nobody opens. A desktop
+# notification is the only form the person at the keyboard will actually see.
+# Best-effort throughout: never let a failure here affect the exit status.
+notify_desktop() {
+  [ "$NOTIFY" -eq 1 ] || return 0
+  [ "$(id -u)" -eq 0 ] || return 0          # only meaningful when run from the hook
+  command -v notify-send >/dev/null 2>&1 || return 0
+
+  local title="$1" body="$2" user uid bus
+  # The user owning the graphical session, not necessarily the one who ran sudo.
+  user=$(loginctl list-sessions --no-legend 2>/dev/null \
+         | awk '{print $3}' | while read -r u; do
+             [ -n "$u" ] && [ -S "/run/user/$(id -u "$u" 2>/dev/null)/bus" ] && { echo "$u"; break; }
+           done)
+  [ -n "$user" ] || user=$(who 2>/dev/null | awk '{print $1}' | head -1)
+  [ -n "$user" ] || return 0
+
+  uid=$(id -u "$user" 2>/dev/null) || return 0
+  bus="/run/user/$uid/bus"
+  [ -S "$bus" ] || return 0
+
+  runuser -u "$user" -- env \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
+      DISPLAY="${DISPLAY:-:0}" \
+    notify-send -u critical -i dialog-error "$title" "$body" >/dev/null 2>&1 || true
+}
 
 cmd_check() {
   local kernels newest running problems=0 crit=0
@@ -130,6 +159,10 @@ cmd_check() {
     done
     printf '  %s\n' "$rule"
     printf '\033[0m\n'
+
+    notify_desktop "Do not reboot yet" \
+      "The new kernel $newest has no Wi-Fi driver. Rebooting into it will leave this laptop with no network. Ask Joe before restarting."
+
     return 2
   fi
 
@@ -147,10 +180,20 @@ cmd_check() {
 
 cmd_install_hook() {
   [ "$(id -u)" -eq 0 ] || die "Run with sudo to install the apt hook."
-  [ -f "$SELF_INSTALLED" ] || {
-    info "installing $SELF_INSTALLED"
+  # A machine updated through Mint's Update Manager rather than a terminal needs
+  # the desktop notification, or the warning is written where nobody looks.
+  local hook_args="check --quiet-ok"
+  [ "$NOTIFY" -eq 1 ] && hook_args="check --quiet-ok --notify"
+  # Always refresh, never "install only if absent". A stale copy at
+  # $SELF_INSTALLED would accept newer flags like --notify and silently ignore
+  # them, leaving a guard that looks installed and quietly does less than you
+  # think — the worst failure mode available to a thing whose job is warning you.
+  if [ -f "$SELF_INSTALLED" ] && cmp -s "$0" "$SELF_INSTALLED"; then
+    ok "$SELF_INSTALLED already current"
+  else
     run install -m 755 "$0" "$SELF_INSTALLED" || die "could not install to $SELF_INSTALLED"
-  }
+    ok "installed $SELF_INSTALLED"
+  fi
 
   say "Installing apt hook"
   # DPkg::Post-Invoke runs after dpkg has finished, so DKMS has already had its
@@ -163,7 +206,7 @@ cmd_install_hook() {
     cat > "$HOOK" <<EOF
 // Installed by kernel-guard.sh. After any apt operation, report whether every
 // installed kernel has its out-of-tree drivers. Never fails the apt run.
-DPkg::Post-Invoke { "if [ -x $SELF_INSTALLED ]; then $SELF_INSTALLED check --quiet-ok || true; fi"; };
+DPkg::Post-Invoke { "if [ -x $SELF_INSTALLED ]; then $SELF_INSTALLED $hook_args || true; fi"; };
 EOF
   fi
   ok "hook written to $HOOK"
@@ -192,6 +235,9 @@ kernel-guard.sh — do not let a kernel land without its drivers
   $0 check           report every installed kernel and its drivers
   $0 check --quiet-ok  print nothing when everything is fine (used by the hook)
   sudo $0 install-hook run that check after every apt operation
+  sudo $0 install-hook --notify
+                       also raise a desktop notification, for a machine whose
+                       updates run through the GUI rather than a terminal
   sudo $0 remove-hook  undo it
 
   --dry-run          show what would change, change nothing
@@ -207,6 +253,7 @@ main() {
     case "$a" in
       --dry-run)  DRY_RUN=1 ;;
       --quiet-ok) QUIET=1 ;;
+      --notify)   NOTIFY=1 ;;
       -h|--help|help) usage; exit 0 ;;
       *) args+=("$a") ;;
     esac

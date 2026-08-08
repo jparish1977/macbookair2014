@@ -286,6 +286,25 @@ The hook ends in `|| true`, which is load-bearing rather than sloppy: apt aborts
 the run on a failing hook, and breaking apt on a machine whose recovery path
 *is* apt would be a worse failure than the one being guarded against.
 
+### On a machine that updates through the GUI
+
+Terminal output is the wrong channel if updates come from Mint's Update Manager
+— the warning lands in a details pane nobody opens. Install with `--notify` and
+it also raises a desktop notification:
+
+```sh
+sudo ./kernel-guard.sh install-hook --notify
+```
+
+It finds the graphical session's owner via `loginctl` (not whoever ran `sudo`)
+and sends through that user's D-Bus socket. Every step is best-effort — no
+session, no `notify-send`, no bus, and it silently does nothing rather than
+disturbing the apt run.
+
+`install-hook` always refreshes `/usr/local/bin/kernel-guard` rather than
+skipping when the file exists: a stale copy would accept newer flags and ignore
+them, leaving a guard that looks installed and quietly does less than you think.
+
 `remove-hook` undoes it and removes the installed copy.
 
 ## `crash-report.sh`
