@@ -620,6 +620,60 @@ Only the *trigger* needs root, and only once.
 Same model, same driver, same default trigger — see the pending list outside
 this repo. `kbd-backlight.sh install` is all it needs.
 
+## `sysfs-watch.sh` and `who-writes.sh`
+
+Two general tools that came out of the keyboard backlight hunt above, kept
+because the next mystery on this machine will look much the same: a value
+changes, and nothing says what changed it.
+
+### `sysfs-watch.sh` — when did it change, and what was running
+
+Polls any sysfs attribute and logs each change with a timestamp, the uptime,
+and the twenty most recently started processes.
+
+    ./sysfs-watch.sh /sys/class/leds/smc::kbd_backlight/brightness --detach
+    ./sysfs-watch.sh /sys/class/power_supply/BAT0/status --seconds 3600 --detach
+    ./sysfs-watch.sh <attr> --at-boot 600        # then --at-boot-off to remove
+
+The two flags are the whole point. `--detach` outlives logout, which works
+because logind's `KillUserProcesses` is at its default of `no`. `--at-boot`
+installs a `@reboot` crontab entry, which is the only way to be watching
+*before* a login when the login is the suspect — a session autostart is already
+too late. It rewrites the crontab through a filter so the existing
+`rescue-status.sh` entry survives; verified by installing and removing.
+
+It names the neighbourhood, not the culprit. That is often enough to decide
+what to reach for next; when it is not, use the other one.
+
+### `who-writes.sh` — what actually wrote it
+
+Traces `kernfs_fop_write_iter`, the single funnel every sysfs write passes
+through, filtered in-kernel to one file. Needs `bpftrace` and root.
+
+    sudo ./who-writes.sh /sys/class/leds/smc::kbd_backlight/brightness \
+         --run 'systemctl restart fwupd'
+    sudo ./who-writes.sh <attr> --probe applesmc_brightness_set --run '...'
+
+**Both outcomes are answers.** Events printed means a process wrote the file,
+with pid, comm and stack. Nothing printed *while the value changed anyway*
+means no userspace process wrote it at all — which is the finding, not a failed
+run: stop accusing processes and go look at the driver, with `--probe` on its
+setter to get the kernel stack. Recognising that case an hour earlier would
+have saved an hour on the backlight.
+
+### Two rules these encode
+
+**Read the stack, not `comm`.** If a write happens in a softirq or interrupt,
+the pid is whatever was running on that CPU. The backlight trace said `fwupd`
+and sent this on a bisection of 130 fwupd plugins; the frame that mattered was
+`led_timer_function`, four lines further up.
+
+**Verify the instrument before believing the result.** A bisection whose toggle
+silently failed to apply still produced a confident conclusion — `DisabledPlugins=`
+never took effect, and the run reported "plugins ruled out" while the journal
+plainly showed plugins still loading. `who-writes.sh` refuses to start the clock
+until bpftrace reports its probes attached, for the same reason.
+
 ## Prior art, and claims checked against this machine
 
 Other write-ups for this hardware. Each one's advice was tested here rather than
