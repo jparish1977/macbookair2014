@@ -100,6 +100,33 @@ Boots ending at `PM: hibernation: hibernation entry` are **normal** — the
 machine powered off and the next start is legitimately a new boot. They are not
 crash signatures, and an unclean-shutdown scan will wrongly flag them.
 
+### Power save disabled as a test, 2026-08-08
+
+`Power save: on` was the leading suspect, so it was turned off to see whether
+the flakiness recurs. Ubuntu ships `wifi.powersave = 3` in
+`/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf`; that file is
+package-managed and would be overwritten, so the override goes in a file that
+sorts later:
+
+```ini
+# /etc/NetworkManager/conf.d/zz-wifi-powersave-off.conf
+[connection]
+wifi.powersave = 2
+```
+
+Confirmed after `systemctl restart NetworkManager`: `iw dev wlp3s0 get
+power_save` reports `off`, connection reassociated on 5GHz with the same
+address.
+
+**This is a diagnostic, not a recommendation.** It increases idle draw by
+roughly 0.1–0.5W against ~11W idle and about an hour of runtime — the opposite
+direction from the power tuning deliberately declined elsewhere on this
+machine. Revert by deleting that one file and restarting NetworkManager.
+
+The result is only meaningful over time. If the lockups stop, power save was
+the cause. If they recur with it off, the leading suspect is eliminated and the
+next step is a real reproduction with out-of-band capture.
+
 ### If this is investigated
 
 Prerequisites, learned from the panic history: the failure mode may be a hard
