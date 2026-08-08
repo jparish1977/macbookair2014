@@ -305,6 +305,24 @@ disturbing the apt run.
 skipping when the file exists: a stale copy would accept newer flags and ignore
 them, leaving a guard that looks installed and quietly does less than you think.
 
+### Seeing it fire
+
+```sh
+./kernel-guard.sh test-alarm
+```
+
+Prints the real banner — and sends the real notification, if the hook was
+installed with `--notify` — clearly marked as a test, then reports the machine's
+actual state underneath so a drill can never be mistaken for a fault. It calls
+the same function the live check does, because a drill that exercises a *copy*
+of the alarm only proves the copy works.
+
+Worth doing once on any machine you install this on, particularly with
+`--notify`, since a notification that silently fails to appear looks exactly
+like a healthy machine. The alternative test — removing a module to see what
+happens — means deliberately breaking Wi-Fi on a machine with no Ethernet port,
+which is a poor way to test a guard against losing Wi-Fi.
+
 `remove-hook` undoes it and removes the installed copy.
 
 ## `crash-report.sh`

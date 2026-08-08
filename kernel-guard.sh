@@ -100,6 +100,75 @@ notify_desktop() {
     notify-send -u critical -i dialog-error "$title" "$body" >/dev/null 2>&1 || true
 }
 
+# The banner and the notification, in one place, so that `test-alarm` fires the
+# real thing rather than a lookalike. A drill that exercises a copy of the alarm
+# proves only that the copy works.
+critical_alarm() {
+  local newest="$1" tag="${2:-}"
+  local lines=(
+    "DO NOT REBOOT YET"
+    ""
+    "The newest kernel has no wl module. This machine has no"
+    "Ethernet port, so booting it means no network at all."
+    ""
+    "Fix it now, while you still have this session:"
+    "  sudo dkms autoinstall -k $newest"
+    "  sudo apt install --reinstall linux-headers-$newest"
+    ""
+    "Or boot the older kernel from the GRUB menu instead."
+  )
+  [ -n "$tag" ] && lines=("$tag" "" "${lines[@]}")
+
+  # Keep every line above ASCII. ${#l} counts characters but printf's %-*s pads
+  # by bytes, so one em-dash inside the box silently shortens that row by two
+  # columns and the border stops lining up.
+  #
+  # Size the box from its longest line. The kernel version is interpolated and
+  # its length varies, so any hardcoded width misaligns as soon as a version
+  # string grows — which is exactly when this box is being read in a panic.
+  local inner=0 l
+  for l in "${lines[@]}"; do
+    [ "${#l}" -gt "$inner" ] && inner="${#l}"
+  done
+  local rule; rule=$(printf '#%.0s' $(seq 1 $((inner + 6))))
+
+  printf '\n\033[1;31m'
+  printf '  %s\n' "$rule"
+  for l in "${lines[@]}"; do
+    printf '  #  %-*s  #\n' "$inner" "$l"
+  done
+  printf '  %s\n' "$rule"
+  printf '\033[0m\n'
+
+  local ntitle="Do not reboot yet"
+  [ -n "$tag" ] && ntitle="[TEST] $ntitle"
+  notify_desktop "$ntitle" \
+    "The new kernel $newest has no Wi-Fi driver. Rebooting into it will leave this laptop with no network. Ask Joe before restarting."
+}
+
+# Fire the alarm deliberately. The alternative — actually removing a module to
+# see what happens — means deliberately breaking Wi-Fi on a machine with no
+# Ethernet port, which is a poor way to test a guard against losing Wi-Fi.
+cmd_test_alarm() {
+  local newest
+  newest=$(installed_kernels | tail -1)
+  [ -n "$newest" ] || newest="$(uname -r)"
+
+  say "Firing the alarm as a drill — nothing is wrong with this machine"
+  critical_alarm "$newest" "*** THIS IS A TEST - NOTHING IS ACTUALLY BROKEN ***"
+  info "That is exactly what an upgrade would print, plus a desktop"
+  info "notification if the hook was installed with --notify."
+  info ""
+  info "Real state:"
+  QUIET=0 NOTIFY=0 cmd_check >/dev/null 2>&1
+  case $? in
+    0) ok "all kernels have both drivers — nothing to do" ;;
+    1) warn "a non-critical gap exists; run '$0 check'" ;;
+    2) bad "this machine really does have a missing wl — run '$0 check'" ;;
+  esac
+  return 0
+}
+
 cmd_check() {
   local kernels newest running problems=0 crit=0
   mapfile -t kernels < <(installed_kernels)
@@ -131,38 +200,7 @@ cmd_check() {
   done
 
   if [ "$crit" -eq 1 ]; then
-    # Size the box from its longest line. The kernel version is interpolated and
-    # its length varies, so any hardcoded width misaligns as soon as a version
-    # string grows — which is exactly when this box is being read in a panic.
-    local lines=(
-      "DO NOT REBOOT YET"
-      ""
-      "The newest kernel has no wl module. This machine has no"
-      "Ethernet port, so booting it means no network at all."
-      ""
-      "Fix it now, while you still have this session:"
-      "  sudo dkms autoinstall -k $newest"
-      "  sudo apt install --reinstall linux-headers-$newest"
-      ""
-      "Or boot the older kernel from the GRUB menu instead."
-    )
-    local inner=0 l
-    for l in "${lines[@]}"; do
-      [ "${#l}" -gt "$inner" ] && inner="${#l}"
-    done
-    local rule; rule=$(printf '#%.0s' $(seq 1 $((inner + 6))))
-
-    printf '\n\033[1;31m'
-    printf '  %s\n' "$rule"
-    for l in "${lines[@]}"; do
-      printf '  #  %-*s  #\n' "$inner" "$l"
-    done
-    printf '  %s\n' "$rule"
-    printf '\033[0m\n'
-
-    notify_desktop "Do not reboot yet" \
-      "The new kernel $newest has no Wi-Fi driver. Rebooting into it will leave this laptop with no network. Ask Joe before restarting."
-
+    critical_alarm "$newest" ""
     return 2
   fi
 
@@ -238,6 +276,7 @@ kernel-guard.sh — do not let a kernel land without its drivers
   sudo $0 install-hook --notify
                        also raise a desktop notification, for a machine whose
                        updates run through the GUI rather than a terminal
+  $0 test-alarm       fire the alarm as a drill, changing nothing
   sudo $0 remove-hook  undo it
 
   --dry-run          show what would change, change nothing
@@ -260,6 +299,7 @@ main() {
   done
 
   case "${args[0]:-check}" in
+    test-alarm)   cmd_test_alarm ;;
     check)
       # --quiet-ok suppresses the ok path but never the warnings: the whole
       # point is that a problem is impossible to miss in apt's output.
