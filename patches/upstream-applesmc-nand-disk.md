@@ -30,20 +30,21 @@ tree. None of it is recalled or assumed.
 | **The patched driver holds the level** | 204 set, `systemctl restart fwupd`, still 204 |
 | **All of it re-confirmed on a mainline kernel** | v7.0 built from the tag, installed and booted on the machine (`uname -r` = `7.0.0-mba`); control reproduced the fault, patched module fixed it |
 
-Hardware and kernel actually tested on:
+Hardware and kernels actually tested on:
 
     MacBookAir6,1, Apple Inc., BIOS 430.0.0.0.0, Intel Core i5-4260U
     Linux 7.0.0-28-generic (Ubuntu #28~24.04.1)
+    Linux 7.0.0-mba          (mainline v7.0, self-built, booted on the machine)
 
 ## What is NOT verified — know this before you send
 
-- **Only tested on one machine so far.** A MacBookAir6,1. Jenni's machine is
-  the same model and can confirm it independently once reachable; a second
-  model would be better still, but neither is available here.
+An earlier caveat here said the host kernel was the distro's rather than
+mainline. **That is resolved** — a mainline v7.0 kernel was built, installed,
+booted, and the whole control-and-patch test re-run on it. What remains:
 
-(The "not tested on mainline" caveat that stood here is **resolved** — see
-below. A mainline v7.0 kernel was built and booted on the affected hardware and
-the whole test re-run on it.)
+- **Only tested on one machine.** A MacBookAir6,1, on two kernels. Jenni's
+  machine is the same model and can confirm it independently once reachable; a
+  second *model* would be better still, but none is available here.
 - **The lore search was for `applesmc nand-disk`.** A report phrased differently
   ("keyboard backlight turns off") could exist and not match. Worth one more
   search on other terms before sending.
