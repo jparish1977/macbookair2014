@@ -47,12 +47,13 @@ fi
 echo "=== packages ==="
 $SUDO DEBIAN_FRONTEND=noninteractive apt-get update -qq
 $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  build-essential flex bison libssl-dev libelf-dev bc rsync dwarves \
+  build-essential flex bison libssl-dev libelf-dev libdw-dev bc rsync dwarves \
   debhelper ccache libncurses-dev cpio zstd kmod git curl \
+  gcc-multilib libc6-dev-i386 \
   || die "package install failed"
 
 missing=0
-for p in build-essential flex bison libssl-dev libelf-dev bc dwarves debhelper ccache cpio; do
+for p in build-essential flex bison libssl-dev libelf-dev libdw-dev bc dwarves debhelper ccache cpio gcc-multilib; do
   dpkg -l "$p" 2>/dev/null | grep -q '^ii' || { echo "  MISSING: $p"; missing=1; }
 done
 [[ "$missing" == "0" ]] && echo "  all present"

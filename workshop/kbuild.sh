@@ -73,6 +73,26 @@ PROFILE="$WS/targets/$TARGET"
 [[ -f "$PROFILE/config" ]] || die "$PROFILE/config missing"
 [[ "$HERE" == "1" || -n "$REF" ]] || die "need --ref, or --here to build what is checked out"
 
+# Decide ARCH from the target's own uname -m. 32-bit x86 is the same toolchain
+# with -m32 (needs gcc-multilib, which provision.sh installs), so it just works.
+# Anything else needs a cross toolchain and a different install path, which this
+# script does not do -- refuse loudly rather than build something wrong.
+TARGET_ARCH=$(cat "$PROFILE/arch" 2>/dev/null || awk '/^arch:/{print $2}' "$PROFILE/facts.txt" 2>/dev/null)
+MAKEARGS=()
+case "${TARGET_ARCH:-$(uname -m)}" in
+  x86_64) ;;
+  i386|i486|i586|i686)
+    MAKEARGS=(ARCH=i386)
+    echo "target is 32-bit x86 -> ARCH=i386"
+    ;;
+  arm*|aarch64|ppc*|powerpc*)
+    die "target arch '$TARGET_ARCH' needs cross-compilation, which this script does not do yet.
+       Pis and the Jetson also need a different kernel tree and a non-deb install path --
+       see the ARM section of $WS/README.md before starting."
+    ;;
+  *) die "unrecognised target arch '$TARGET_ARCH'" ;;
+esac
+
 export CCACHE_DIR="${CCACHE_DIR:-$WS/.ccache}"
 ccache -M 25G >/dev/null 2>&1
 
@@ -106,16 +126,16 @@ if [[ "$KEEP_DEBUG" != "1" ]]; then
 fi
 
 echo "resolving config ..."
-make olddefconfig >/dev/null || die "olddefconfig failed"
+make "${MAKEARGS[@]}" olddefconfig >/dev/null || die "olddefconfig failed"
 
 if [[ "$TRIM" == "1" ]]; then
   [[ -f "$PROFILE/lsmod" ]] || die "--trim needs $PROFILE/lsmod"
   echo "trimming to the $(($(wc -l < "$PROFILE/lsmod") - 1)) modules '$TARGET' actually loads ..."
-  yes '' 2>/dev/null | make LSMOD="$PROFILE/lsmod" localmodconfig >/dev/null 2>&1
+  yes '' 2>/dev/null | make "${MAKEARGS[@]}" LSMOD="$PROFILE/lsmod" localmodconfig >/dev/null 2>&1
   # localmodconfig can quietly re-enable the certificate options
   scripts/config --set-str SYSTEM_TRUSTED_KEYS ""
   scripts/config --set-str SYSTEM_REVOCATION_KEYS ""
-  make olddefconfig >/dev/null
+  make "${MAKEARGS[@]}" olddefconfig >/dev/null
 fi
 
 OUTDIR="$WS/builds/$TARGET-$SLUG"
@@ -123,9 +143,17 @@ mkdir -p "$OUTDIR"
 cp .config "$OUTDIR/config-used"
 
 echo "building with $JOBS jobs (ccache on) ..."
+echo "  full log: $OUTDIR/build.log"
 start=$SECONDS
-if ! make -j"$JOBS" CC="ccache gcc" KDEB_PKGVERSION=1 bindeb-pkg 2>&1 | tail -25; then
-  die "build failed -- the full log is above; rerun without '| tail' to see more"
+# tee, not tail: a failed kernel build is diagnosed from the hundred lines
+# before the error, and piping straight to tail throws exactly those away.
+if ! make -j"$JOBS" "${MAKEARGS[@]}" CC="ccache gcc" KDEB_PKGVERSION=1 bindeb-pkg 2>&1 \
+     | tee "$OUTDIR/build.log" | tail -25; then
+  echo
+  echo "build failed. The full log is at $OUTDIR/build.log" >&2
+  echo "First error:" >&2
+  grep -m3 -nE 'Error [0-9]|error:|No rule to make' "$OUTDIR/build.log" >&2
+  exit 1
 fi
 elapsed=$((SECONDS - start))
 

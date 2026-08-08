@@ -113,6 +113,68 @@ before rebooting, especially if the version sorts above the distro's.
    else.
 4. **Stale tree.** `git -C linux fetch --tags` if a ref is not found.
 
+## Targets that are not x86-64
+
+### 32-bit x86 — supported, and probably what you actually need
+
+Mainline still supports it: `CONFIG_X86_32` and `arch/x86/configs/i386_defconfig`
+are both present as of v7.0. `gcc-multilib` and `libc6-dev-i386` were installed
+on i8 on 2026-08-08 and verified by compiling an `ELF 32-bit ... Intel 80386`
+binary, so the host can emit 32-bit code.
+
+**This is not cross-compiling.** A 32-bit x86 target is the same toolchain with
+`-m32`, which is why it is cheap. `kbuild.sh` passes `ARCH=i386` automatically
+when the target profile says the machine is 32-bit — `capture-target.sh` records
+that, so it happens without you thinking about it.
+
+**First candidate: the Fujitsu LifeBook U810.** Its Intel A110 ("Stealey") is a
+Pentium M derivative with no Intel 64, so that machine is 32-bit only and lands
+squarely in this case rather than needing a cross toolchain. Treat that as
+expected, not established — run `capture-target.sh` on it and believe the `arch`
+file it writes.
+
+Reaching it: it appears on the tailnet as `u810-bunsenlabs` (100.90.76.72), and
+like `iteration8` its ssh alias points at a `.local` name that only resolves on
+its own LAN. Use the tailnet address from anywhere else.
+
+### ARM — Raspberry Pis and a Jetson Nano — not wired up yet
+
+There are Pis in quantity and a Jetson Nano to serve, so this is a real gap
+rather than a hypothetical one. It is deliberately deferred, and the reason is
+worth knowing before anyone starts: **the hard part is not the compiler.**
+
+Toolchains are one `apt install` away:
+
+| target | package | `ARCH=` |
+| --- | --- | --- |
+| Pi 1 / Zero / Zero W (armv6) | `gcc-arm-linux-gnueabihf` | `arm` |
+| Pi 2 / 3 / 4 on 32-bit Pi OS | `gcc-arm-linux-gnueabihf` | `arm` |
+| Pi 3 / 4 / 5 on 64-bit Pi OS | `gcc-aarch64-linux-gnu` | `arm64` |
+| Jetson Nano | `gcc-aarch64-linux-gnu` | `arm64` |
+
+Three things break the assumptions this workshop currently makes:
+
+1. **Mainline is often the wrong tree.** Raspberry Pi OS runs the Foundation's
+   `raspberrypi/linux`, not `torvalds/linux`, and the Jetson Nano runs NVIDIA's
+   L4T/JetPack kernel — a vendor BSP, on an old kernel, for a board NVIDIA has
+   since dropped. Building mainline for a Nano is a research project, not a
+   build. So `kbuild.sh` would need to work against **several trees**, not the
+   one it clones today.
+2. **`bindeb-pkg` is not how these get installed.** A Pi kernel is `Image` or
+   `kernel8.img` copied into `/boot/firmware` alongside its device tree blobs,
+   plus `make modules_install`. The deb pipeline this script is built around
+   does not apply.
+3. **Device trees matter.** On ARM the kernel alone is not enough; the matching
+   DTBs have to land too, and a mismatch fails in ways that look nothing like a
+   kernel bug.
+
+None of that is hard, but it is a different shape of job from x86 — enough that
+bolting it onto `kbuild.sh` badly would be worse than a second script. Revisit
+with a specific board and a specific problem, not in the abstract.
+
+PowerPC (`gcc-powerpc-linux-gnu`) is available too, should an old Mac ever
+join the list.
+
 ## Bisecting a regression
 
 This is the reason the clone is full rather than shallow, and the reason this

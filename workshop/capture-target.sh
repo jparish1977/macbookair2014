@@ -41,6 +41,10 @@ cp "/boot/config-$REL" "$OUT/config" 2>/dev/null || {
 }
 lsmod > "$OUT/lsmod"
 echo "$REL" > "$OUT/uname"
+# Machine-readable, because kbuild.sh decides ARCH= from it. A 32-bit x86
+# machine is not a cross-compile, just -m32, so it can be handled silently --
+# anything else has to stop and say so.
+uname -m > "$OUT/arch"
 
 {
   echo "captured:   $(date -Is)"
