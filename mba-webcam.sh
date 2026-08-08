@@ -159,6 +159,25 @@ installed_dkms_version() {
   dkms status "$PKG" 2>/dev/null | head -1 | sed 's#^'"$PKG"'[/,] *##; s#[,/].*##'
 }
 
+# DKMS state is per kernel: a module built under 7.0.0-28 does nothing when you
+# boot 6.17.0-41. Registration alone therefore proves nothing about the running
+# kernel — booting an older entry from the grub menu leaves the package fully
+# registered with no module built for the kernel actually running. Read the
+# status line for this kernel specifically.
+#
+# Process substitution rather than a pipe, for the same reason the other status
+# helpers avoid one: `dkms status | grep -q` returns 141 under pipefail when
+# grep exits first, which reads as "not built" on a machine where it is.
+dkms_built_for() {
+  local kver="$1" line
+  while IFS= read -r line; do
+    case "$line" in
+      *", $kver, "*": installed"*) return 0 ;;
+    esac
+  done < <(dkms status "$PKG" 2>/dev/null)
+  return 1
+}
+
 # ---------------------------------------------------------------- preflight
 preflight() {
   say "Preflight"
@@ -241,10 +260,40 @@ install_firmware() {
 install_driver() {
   say "2/3  Driver (DKMS)"
 
+  local kver; kver=$(uname -r)
+
   local existing; existing=$(installed_dkms_version)
   if [ -n "$existing" ]; then
-    ok "$PKG $existing already registered with DKMS"
-    info "Use 'uninstall' first if you want to rebuild from scratch."
+    if dkms_built_for "$kver"; then
+      ok "$PKG $existing already built for $kver"
+      info "Use 'uninstall' first if you want to rebuild from scratch."
+      return 0
+    fi
+
+    # Registered under a different kernel — the usual case after booting an
+    # older entry from grub. The sources are already staged in /usr/src, so
+    # there is nothing to re-clone or re-download; build the one module this
+    # kernel is missing. AUTOINSTALL only fires on kernel *install*, and the
+    # kernel we just booted into was installed before facetimehd existed here.
+    info "$PKG $existing is registered but has no module for $kver."
+    info "Building against the running kernel (sources already in /usr/src)..."
+
+    # Not run() here: these redirect their own output, and run()'s --dry-run
+    # print would be swallowed by that redirect rather than shown.
+    if [ "$DRY_RUN" -eq 1 ]; then
+      run dkms build -m "$PKG" -v "$existing" -k "$kver"
+      run dkms install -m "$PKG" -v "$existing" -k "$kver"
+      return 0
+    fi
+
+    if ! dkms build -m "$PKG" -v "$existing" -k "$kver" >/dev/null 2>&1; then
+      bad "DKMS build failed for $kver."
+      info "Full log:  /var/lib/dkms/$PKG/$existing/build/make.log"
+      die "Driver did not build."
+    fi
+    dkms install -m "$PKG" -v "$existing" -k "$kver" >/dev/null 2>&1 \
+      || die "DKMS build succeeded but install failed for $kver."
+    ok "built and installed for $kver"
     return 0
   fi
 
@@ -405,9 +454,18 @@ cmd_status() {
   if [ -s "$fw" ]; then ok "firmware   $fw ($(du -h "$fw" 2>/dev/null | cut -f1))"
   else bad "firmware   missing"; fi
 
-  local ver; ver=$(installed_dkms_version)
-  if [ -n "$ver" ]; then ok "dkms       $PKG/$ver"
-  else bad "dkms       not registered"; fi
+  local ver kver; ver=$(installed_dkms_version); kver=$(uname -r)
+  if [ -z "$ver" ]; then
+    bad "dkms       not registered"
+  elif dkms_built_for "$kver"; then
+    ok "dkms       $PKG/$ver, built for $kver"
+  else
+    # Registered but nothing built for the running kernel: the module cannot
+    # load and every check below this line will fail. Worth naming, because it
+    # looks identical to a healthy install if you only read the version.
+    bad "dkms       $PKG/$ver registered, but NOT built for $kver"
+    info "           Fix:  sudo $0 install"
+  fi
 
   if module_loaded; then ok "module     loaded"
   else bad "module     not loaded"; fi

@@ -89,7 +89,13 @@ Two things worth knowing:
   If it fails, Apple has usually rotated the CDN URL baked into the upstream
   Makefile.
 - **DKMS carries it across kernel upgrades** (`AUTOINSTALL=yes`), the same way
-  `broadcom-sta` already does here.
+  `broadcom-sta` already does here. It does *not* carry backwards: `AUTOINSTALL`
+  fires when a kernel is installed, so booting a kernel that was already on disk
+  before the camera was set up gives you a registered package with no module
+  built for it, and no `/dev/video*`. That is not a hypothetical here — booting
+  the older kernel is this machine's documented Wi-Fi recovery path. Re-run
+  `sudo ./mba-webcam.sh install`; it detects the gap and builds just the missing
+  module without re-cloning or re-downloading anything.
 
 `dkms.conf` upstream does not reliably track the git tag — master still declares
 `0.7.0.1` while `0.7.0.2` is released — so the script reads `PACKAGE_VERSION`
