@@ -674,6 +674,42 @@ never took effect, and the run reported "plugins ruled out" while the journal
 plainly showed plugins still loading. `who-writes.sh` refuses to start the clock
 until bpftrace reports its probes attached, for the same reason.
 
+## `module-patch-test.sh`
+
+Test a patch to a one-file kernel module on the machine that actually has the
+hardware, with a control condition and a restore that always runs.
+
+    sudo ./module-patch-test.sh --module NAME (--patch FILE | --sed EXPR) \
+         --check CMD [--setup CMD] [--teardown CMD] [--provoke CMD] [--prepare CMD]
+
+Generalised from `applesmc-patch-test.sh` after that one proved the backlight
+fix. The shape recurs on old hardware: the fault is in a driver, the driver is
+one `.c` file, and the only machine qualified to judge the fix is the broken
+one. What the tool contributes is the two checks it is easy to skip.
+
+**The control condition.** By the time you have a patch you usually have a
+workaround too, and a workaround reaches the same end state whether or not the
+patch does anything. So the stock module is loaded first and the fault *must*
+reproduce; if `--check` passes there, the run aborts rather than grading its own
+homework. `--setup` exists to disable the workaround for the duration — omit it
+and the abort is exactly what you get.
+
+**The srcversion check.** `srcversion` is a hash over a module's source, so
+building the untouched upstream file and comparing against the running module
+answers two questions at once: whether the distro patches this driver, and
+whether the module really is a single `.c` file. A mismatch means your source
+set is wrong and the test would be meaningless, so it stops.
+
+Verified by re-running the applesmc case through it end to end: same control
+failure, same pass, same patched srcversion `AF9F6279C4AFB73358F535A` as the
+purpose-built script produced.
+
+One sharp edge it cannot smooth over: reloading a module resets state the module
+owned — for applesmc the LED drops to 0 — and the tool has no way to know which
+of that you cared about. Restore it in `--teardown`, which deliberately runs
+*before* the stock module is loaded again, so anything acting on the module's
+add event (a udev rule, most likely) is back in place in time to apply.
+
 ## Prior art, and claims checked against this machine
 
 Other write-ups for this hardware. Each one's advice was tested here rather than
