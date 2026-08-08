@@ -94,8 +94,32 @@ five seconds. You cannot do that from another room.
 good kernel to make room, and check `apt-mark showhold` before an upgrade — on
 the MacBook Air several 6.17 packages are deliberately held for this reason.
 
-**A new kernel may become the GRUB default.** Check what `update-grub` picked
-before rebooting, especially if the version sorts above the distro's.
+**A self-built kernel becomes the GRUB default and stays there — forever.**
+Not just "may". GRUB's own comparison strips at the first `-` and ranks the
+suffix, so `7.0.0-mba` beats `7.0.0-28-generic`, `7.0.0-29-generic`,
+`7.1.0-5-generic` and even `8.0.0-1-generic`. Verified with GRUB's own helper:
+
+    . /usr/share/grub/grub-mkconfig_lib
+    version_test_gt 7.0.0-mba 8.0.0-1-generic && echo "the test kernel wins"
+
+With `GRUB_DEFAULT=0` that means every unattended reboot from now on lands on a
+hand-built kernel that receives no security updates, no matter how many distro
+kernels arrive later.
+
+**So remove a test kernel once it has answered its question.** Reboot onto a
+distro kernel first — actively picking it, since the test kernel is the default
+— and then:
+
+    sudo dkms remove <module>/<version> -k <rel>    # before the package, or wl.ko
+    sudo dpkg -P linux-image-<rel> linux-headers-<rel>   #   is orphaned in /lib/modules
+    sudo update-grub
+
+Leaving it installed also leaves permanent noise: any DKMS module that cannot
+build against it fails on every kernel or driver update, and `kernel-guard`
+reports a gap on every apt run. A guard that warns every single time is a guard
+that gets ignored, which is worse than not having installed it.
+
+Rebuilding takes minutes. Keeping a test kernel around does not pay for itself.
 
 ## Why builds fail, in order of likelihood
 
