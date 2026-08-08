@@ -24,6 +24,10 @@ tree. None of it is recalled or assumed.
 | fwupd is what touches it | `systemctl restart fwupd` reproduces the fault on demand |
 | Nobody has reported this | lore.kernel.org search for `applesmc nand-disk`: 38 results, all the 2007 driver submission, the 2007 heartbeat crash fix, René Rebe's 2008 case-LED patch, and unrelated stable-release noise |
 | Detaching the trigger fixes it | `trigger` set to `none` via udev rule; survives reboot and an fwupd restart |
+| **The distro ships stock upstream source** | `applesmc.c` built from the `v7.0` tag has srcversion `4B4E296F44EBB1541BCA045` — identical to the shipped `applesmc.ko`. Same srcversion means same source, so the driver under test *is* mainline's |
+| **The patch itself was built and loaded** | Patched build (`AF9F6279C4AFB73358F535A`) `insmod`ed on this hardware |
+| **With a control condition** | Rule moved aside + stock module reloaded reproduced `[nand-disk]` first, so the subsequent `[none]` means something |
+| **The patched driver holds the level** | 204 set, `systemctl restart fwupd`, still 204 |
 
 Hardware and kernel actually tested on:
 
@@ -32,9 +36,15 @@ Hardware and kernel actually tested on:
 
 ## What is NOT verified — know this before you send
 
-- **Not tested on a mainline build.** The test kernel is Ubuntu's 7.0.0-28.
-  The code path is identical in mainline, but if asked "did you test mainline?"
-  the honest answer is no. See below for how to fix that if you want to.
+- **The host kernel is Ubuntu's 7.0.0-28, not a mainline build.** The *driver*
+  tested is mainline's — built from the v7.0 tag, and proven identical to the
+  distro's by matching srcversion — but it was loaded into a distro kernel. For
+  this driver that distinction is thin, and the patch says exactly this rather
+  than overclaiming. If a maintainer wants a full mainline kernel test, build
+  one on iteration8 and retest.
+- **Only tested on one machine so far.** A MacBookAir6,1. Jenni's machine is
+  the same model and can confirm it independently once reachable; a second
+  model would be better still, but neither is available here.
 - **The lore search was for `applesmc nand-disk`.** A report phrased differently
   ("keyboard backlight turns off") could exist and not match. Worth one more
   search on other terms before sending.
@@ -96,22 +106,34 @@ Present since the driver was added in commit 6f2fad748ccc ("Apple SMC driver
 since the driver did not regress -- what changed is the environment around it.
 Happy to add one if you would prefer.
 
-Reproducer and diagnosis on MacBookAir6,1 (BIOS 430.0.0.0.0, Core i5-4260U),
-Linux 7.0.0-28-generic:
+Tested on a MacBookAir6,1 (BIOS 430.0.0.0.0, Core i5-4260U) running
+7.0.0-28-generic. The distro ships this driver unmodified: applesmc.c built
+from the v7.0 tag has the same srcversion as the distro's module,
+4B4E296F44EBB1541BCA045, so the driver tested here is mainline's.
 
-  # cat /sys/class/leds/smc::kbd_backlight/trigger
-  none ... mtd [nand-disk] cpu ...
+Before, stock module:
+
   # cat /proc/mtd
   dev:    size   erasesize  name
   mtd0: 00800000 00001000 "BIOS"
-
+  # cat /sys/class/leds/smc::kbd_backlight/trigger
+  none ... mtd [nand-disk] cpu ...
   # echo 204 > /sys/class/leds/smc::kbd_backlight/brightness
-  # systemctl restart fwupd
+  # systemctl restart fwupd        # its mtd plugin reads /dev/mtd0
   # cat /sys/class/leds/smc::kbd_backlight/brightness
   0
 
-bpftrace on the LED set path shows the write coming from the trigger's blink
-timer, not from any process:
+After, with this patch applied:
+
+  # cat /sys/class/leds/smc::kbd_backlight/trigger
+  [none] ... mtd nand-disk cpu ...
+  # echo 204 > /sys/class/leds/smc::kbd_backlight/brightness
+  # systemctl restart fwupd
+  # cat /sys/class/leds/smc::kbd_backlight/brightness
+  204
+
+The zero comes from the trigger's blink timer rather than from any process,
+which is what makes it hard to attribute from userspace:
 
   applesmc_brightness_set  value=0
           applesmc_brightness_set+1
@@ -120,9 +142,6 @@ timer, not from any process:
           __run_timers+555
           run_timer_softirq+138
           handle_softirqs+229
-
-Setting the trigger to "none" resolves it; the level then survives both a
-reboot and an fwupd restart.
 ```
 
 Everything after the `---` is notes for reviewers and is dropped by `git am`,
@@ -193,9 +212,17 @@ device and userspace started reading it. Say you are happy to add one.
 The trigger is still attachable from sysfs or udev. And on hardware where it
 does fire, it makes the keyboard backlight unusable, so it is hard to rely on.
 
-**"Did you test on mainline?"** No — Ubuntu 7.0.0-28-generic. The code is
-unchanged in mainline. If you want to close this off in advance, build a
-mainline kernel on iteration8 and retest before sending.
+**"Did you test on mainline?"** The driver is mainline's — built from the v7.0
+tag, with srcversion matching the distro module, so the source is provably
+identical — and the patched build was loaded on the affected hardware. The
+host kernel was Ubuntu's 7.0.0-28. If they want a full mainline kernel, build
+one on iteration8 and retest; do not claim it until then.
+
+**"How do you know the line is what fixed it, and not your udev rule?"** The
+test moves the rule aside and reloads the stock module first, confirming
+`[nand-disk]` comes back, before loading the patched module and getting
+`[none]`. `applesmc-patch-test.sh` in this repo runs exactly that sequence and
+aborts if the control does not reproduce.
 
 **"Should the LED core preserve brightness across a oneshot blink instead?"**
 Arguably, but that is an LED-core change affecting every driver. Not defaulting
