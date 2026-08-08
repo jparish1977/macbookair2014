@@ -107,19 +107,34 @@ failed install.
 
 ## `fix-camera.sh`
 
-One-command recovery for when the camera stops delivering video. `facetimehd`
-wedges if two apps open the camera at once — sometimes on a single grab — and
-the kernel starts logging `facetimehd 0000:02:00.0: IO: timeout`. Every camera
-app then errors, and a process can freeze in state `D` *inside* the driver,
-holding it open so `modprobe -r` fails with "in use". Nothing short of
-reloading the driver clears it.
+One-command recovery for when the camera stops delivering video.
 
-The script closes the camera apps (Zoom, Cheese, OBS, guvcview), reloads
+What was actually observed, on a machine where the camera had been working:
+after a session with Zoom, the kernel logged `facetimehd 0000:02:00.0: IO:
+timeout` repeatedly with a backtrace through `fthd_buffer_prepare`, and from
+then on *every* camera app errored — Cheese included. A reboot cleared it
+completely; `dmesg` after the reboot showed zero timeouts and the camera worked
+in Cheese, Zoom and OBS in turn.
+
+Two caveats on the folklore around this, because it is easy to state more than
+was verified:
+
+- **The trigger is not confirmed.** Two apps opening the camera at once is the
+  usual explanation and it is consistent with what happened here, but a single
+  grab was never ruled out as sufficient.
+- **`modprobe -r` failing with "in use" was not reproduced.** It happened once,
+  while Zoom was still shutting down. Seconds later `fuser /dev/video*` was
+  empty, no process was in state `D`, and nothing held the device — so on that
+  occasion the module was simply still busy with a dying process, not pinned by
+  anything frozen. Whether a genuinely stuck task can pin it is untested here.
+
+So the script tries the cheap thing first and does not pretend to know more
+than that: it closes the camera apps (Zoom, Cheese, OBS, guvcview), reloads
 `facetimehd`, and reports the fresh node. It re-execs itself under `sudo`, so a
 non-technical user just runs `fix-camera` and enters a password — no arguments,
-no driver knowledge. When a process is truly frozen in the driver (the case a
-reload cannot fix), it says so and points at `sudo reboot` rather than failing
-silently.
+no driver knowledge. If the unload fails it checks for a `D`-state process at
+that moment and says which case it is, then points at `sudo reboot` — the one
+recovery actually confirmed to work.
 
 Install it as a plain command so it is reachable from any terminal:
 
