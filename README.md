@@ -247,6 +247,40 @@ whether a future wedge recovers on its own. Upstream is also explicit that this
 addresses the driver's inability to *recover* from a timeout, not the reason the
 firmware times out.
 
+## `crash-report.sh`
+
+Reads the crash reports `mintreport-tray` nags about.
+
+Apport `.crash` files look like plain text but are not: the fields worth reading
+— the Xorg log, the dmesg tail, the stack — are stored as a literal `base64`
+marker followed by base64-encoded gzip. Opening one in a pager gives megabytes
+of encoded noise and no answer, which is why these tend to get dismissed rather
+than read.
+
+```sh
+./crash-report.sh                 # what is queued
+sudo ./crash-report.sh show       # summarise each one, decoded
+sudo ./crash-report.sh clear      # delete them, asks first — stops the popup
+```
+
+It decodes those fields, prints the signal with its meaning (`6` is an abort
+from a failed internal assertion, `11` a segfault — a distinction that changes
+where to look), pulls the `(EE)` lines out of an Xorg log, and reports which
+video driver was actually *loaded* rather than merely probed.
+
+The most useful line it prints is often this one:
+
+```
+[warn] obs-studio is no longer installed — this report is moot
+```
+
+A report for a package you have since removed or replaced needs no
+investigation at all. Both reports queued on this machine turned out that way or
+close to it.
+
+Reading another user's report needs root — Xorg's are root-owned — so `list`
+works unprivileged but `show` generally wants `sudo`.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift
