@@ -34,15 +34,24 @@ run() {
   "$@"
 }
 
+# Description only — the name is printed separately, from apport's SignalName
+# where it has one, so returning it here too just stutters.
 signal_meaning() {
   case "${1:-}" in
-    4)  echo "SIGILL — illegal instruction" ;;
-    6)  echo "SIGABRT — abort, usually a failed internal assertion" ;;
-    7)  echo "SIGBUS — bad memory alignment or bad hardware access" ;;
-    8)  echo "SIGFPE — arithmetic fault" ;;
-    11) echo "SIGSEGV — segfault, invalid memory access" ;;
+    4)  echo "illegal instruction" ;;
+    6)  echo "abort, usually a failed internal assertion" ;;
+    7)  echo "bad memory alignment or bad hardware access" ;;
+    8)  echo "arithmetic fault" ;;
+    11) echo "segfault, invalid memory access" ;;
     "") echo "(no Signal field — may not be a crash report)" ;;
-    *)  echo "signal $1" ;;
+    *)  echo "unrecognised signal" ;;
+  esac
+}
+
+signal_name() {
+  case "${1:-}" in
+    4) echo SIGILL ;; 6) echo SIGABRT ;; 7) echo SIGBUS ;;
+    8) echo SIGFPE ;; 11) echo SIGSEGV ;; *) echo "" ;;
   esac
 }
 
@@ -129,7 +138,17 @@ summarise_one() {
   [ -n "$pkg" ]  && info "package     $pkg"
   [ -n "$date" ] && info "when        $date"
   [ -n "$cmd" ]  && info "cmdline     $(printf '%s' "$cmd" | cut -c1-100)"
-  [ -n "$sig" ]  && info "signal      $sig — $(signal_meaning "$sig")"
+  # apport usually records SignalName too; prefer it over guessing from the
+  # number, and fall back to the table when it is absent.
+  local signame; signame=$(field_body "$f" SignalName | head -1)
+  [ -n "$signame" ] || signame=$(signal_name "$sig")
+  if [ -n "$sig" ]; then
+    if [ -n "$signame" ]; then
+      info "signal      $sig ($signame) — $(signal_meaning "$sig")"
+    else
+      info "signal      $sig — $(signal_meaning "$sig")"
+    fi
+  fi
 
   # Is the crashing package even installed any more? A report for something you
   # have since removed or replaced is not worth reading.
@@ -145,6 +164,16 @@ summarise_one() {
     info ""
     info "stack (top frames):"
     printf '%s\n' "$st" | head -8 | sed 's/^/      /'
+  elif grep -qa '^CoreDump:' "$f"; then
+    # Not a gap in this script: apport writes the raw core at crash time and
+    # only produces a symbolised stack when the report is retraced. An untouched
+    # .crash therefore never has one. Say so, rather than printing nothing and
+    # looking broken.
+    info ""
+    info "stack        not present — apport stores only the raw CoreDump until"
+    info "             the report is retraced. To symbolise it:"
+    info "               sudo apt install apport-retrace"
+    info "               sudo apport-retrace -g $f"
   fi
 
   # An abort usually says why on its way out; a segfault usually does not. The
@@ -168,6 +197,27 @@ summarise_one() {
       | grep -oE 'Loading /usr/lib/xorg/modules/drivers/[a-z]+_drv\.so' \
       | grep -oE '[a-z]+_drv' | sort -u | tr '\n' ' ')
     [ -n "$ddx" ] && { info ""; info "video drivers loaded: $ddx"; }
+  elif [ "$(field_body "$f" SourcePackage | head -1)" = "xorg-server" ]; then
+    info ""
+    info "no XorgLog captured — apport's Xorg hook did not run, so which video"
+    info "driver was loaded cannot be recovered from this report."
+  fi
+
+  # What kernel it happened under. On a machine that keeps an experimental
+  # kernel around, "which kernel" is often the whole answer.
+  # "Uname: Linux 7.0.0-28-generic x86_64" — the release is field 2. Field 3 is
+  # the architecture, which is not a kernel version and reads as nonsense.
+  local un; un=$(field_body "$f" Uname | head -1)
+  if [ -n "$un" ]; then
+    local kv; kv=$(printf '%s' "$un" | awk '{print $2}')
+    case "$kv" in
+      *.*)
+        if [ "$kv" != "$(uname -r)" ]; then
+          info ""
+          info "crashed under $kv — not the kernel you are on now ($(uname -r))"
+        fi
+        ;;
+    esac
   fi
 }
 
