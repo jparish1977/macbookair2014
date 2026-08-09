@@ -1419,7 +1419,7 @@ for an image that refuses unwritten extents.
 
 ### `verify` — does everything this repo installs still work?
 
-    ./vm-restore-test.sh verify              # 14 checks, ~3 minutes
+    ./vm-restore-test.sh verify              # 21 checks, ~3 minutes
     ./vm-restore-test.sh verify-control      # prove they can fail
 
 The rig does **not** reimplement the helpers' checks. Several already have
@@ -1439,7 +1439,7 @@ read its report.
 | **mechanism** | it builds, it loads, the rule matches and acts | a VM |
 | **device** | Wi-Fi associates, the camera captures, sound comes out | metal — **not guessed at here** |
 
-What it checks, all 14 passing on a healthy image:
+What it checks, all 21 passing on a healthy image:
 
     artefact   facetimehd firmware, kbd-backlight rule, webcam tune rule,
                kernel-guard apt hook
@@ -1448,7 +1448,8 @@ What it checks, all 14 passing on a healthy image:
     module     applesmc is shipped (see below)
     rule       udev acts on a SYNTHETIC smc::kbd_backlight
     helper     kernel-guard check, kbd-backlight status
-    system     no failed units, both swap tiers up
+    audio      card, driver, playback, capture, PCM open, userspace (see below)
+    system     which kernel was booted, no failed units, both swap tiers up
 
 **`applesmc` is graded differently, and has to be.** It *refuses* to load without
 an Apple SMC — `No such device` — where `wl` and `facetimehd` load happily and
@@ -1556,6 +1557,36 @@ shows only `kernel mount`, sending you after a process that does not exist. And
 the rsync daemon is now started *immediately before the guest fetches from it*
 rather than before a 90-second boot, because a long window is one in which
 anything that tidies stray processes takes it away, intermittently.
+
+#### Audio is the one area with a usable stand-in
+
+Wi-Fi and the camera can only be *built* in a VM. Audio can be **exercised**,
+because QEMU emulates an HDA controller — `bootdisk` gives the guest
+`ich9-intel-hda` with `-audiodev none`, so it gets a real controller on a
+headless host and the samples go nowhere.
+
+    audio:card        Intel                         controller found
+    audio:driver      snd_hda_intel loaded and bound
+    audio:playback    card 0: Intel [HDA Intel], device 0: Generic Analog
+    audio:capture     a capture device is present
+    audio:pcm-open    opened hw:0,0 and wrote a second of samples
+    audio:userspace   pipewire/wireplumber installed
+
+`audio:pcm-open` is the one that matters. Enumeration proves a device node
+exists; opening the PCM and writing to it proves the path works, and it is the
+one check a broken stack cannot fake.
+
+**What this does not and cannot test:** the laptop's codec is a Cirrus CS4208
+and QEMU's is generic, so codec-specific behaviour — jack detection,
+speaker/headphone routing, the `model=` quirks Macs so often need — is out of
+reach. And PipeWire is a per-user service with no session to run in behind a
+serial root login, so `audio:userspace` checks presence only. Claiming more would
+be inventing a result.
+
+**Proven able to fail.** `MBA_VMTEST_NO_AUDIO=1 ./vm-restore-test.sh verify`
+takes the card away: the five hardware checks go red and `audio:userspace`
+correctly stays green, being a package check. Without that control they would
+only ever prove that qemu was asked for a sound card.
 
 **zram needs no help at all.** `/dev/zram0` comes back with the restore at
 priority 100, ahead of the disk swapfile at -1, because it is configured on the

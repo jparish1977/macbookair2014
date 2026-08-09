@@ -374,6 +374,19 @@ cmd_bootdisk() {
   [ -n "$mine" ] && kill -0 "$mine" 2>/dev/null && { kill "$mine"; sleep 3; }
   rm -f "$WORK/serial.sock" "$WORK/mon.sock"
 
+  # Audio is emulated on purpose -- it is the ONE helper area with a usable
+  # stand-in, so unlike Wi-Fi and the camera the stack can be exercised instead
+  # of merely built. -audiodev none because this host is headless: the guest gets
+  # a real controller, the samples go nowhere.
+  #
+  # MBA_VMTEST_NO_AUDIO=1 takes the card away, which is how the audio checks are
+  # shown to be capable of failing. Without that control they only ever prove
+  # that qemu was asked for a sound card.
+  local audio_args=(-audiodev none,id=snd0
+                    -device ich9-intel-hda,id=hda
+                    -device hda-duplex,bus=hda.0,audiodev=snd0)
+  [ "${MBA_VMTEST_NO_AUDIO:-0}" = 1 ] && audio_args=()
+
   cat > "$WORK/mon.py" <<'PY'
 import socket, sys, time
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1]); s.settimeout(0.5)
@@ -396,6 +409,7 @@ PY
     -device ich9-ahci,id=ahci \
     -drive file="$img",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
     -netdev user,id=n0,restrict=on -device e1000,netdev=n0 \
+    "${audio_args[@]}" \
     -serial "unix:$WORK/serial.sock,server,nowait" -display none \
     -monitor "unix:$WORK/mon.sock,server,nowait" -pidfile "$WORK/qemu.pid" \
     > "$WORK/qemu-disk.log" 2>&1 &
@@ -1098,6 +1112,57 @@ if [ -x "$REPO/kbd-backlight.sh" ] && [ -d "$LED" ]; then
   fi
 else
   R SKIP "helper:kbd-backlight" "helper or synthetic LED absent"
+fi
+
+# ------------------------------------------------------------------- audio
+# The one helper area with an emulated stand-in: bootdisk gives the guest an
+# ich9-intel-hda controller, so unlike Wi-Fi and the camera the audio path can be
+# exercised rather than merely built.
+#
+# WHAT THIS DOES NOT TEST. The laptop's codec is a Cirrus CS4208 and QEMU's is a
+# generic one, so codec-specific behaviour -- jack detection, speaker/headphone
+# routing, the model= quirks Macs so often need -- is NOT covered and cannot be.
+# Everything ABOVE the codec is: the controller is found, snd_hda_intel binds it,
+# ALSA presents playback and capture, and a PCM can actually be opened and
+# written. That last is the difference between "a device node exists" and "the
+# audio path works", and it is the only one of these a broken stack cannot fake.
+if grep -q '\[' /proc/asound/cards 2>/dev/null; then
+  R PASS "audio:card" "$(sed -n 's/^ *[0-9] \[\([^]]*\)\].*/\1/p' /proc/asound/cards | head -1 | tr -s ' ')"
+else
+  R FAIL "audio:card" "no sound card enumerated at all"
+fi
+
+if lsmod | grep -q '^snd_hda_intel'; then
+  R PASS "audio:driver" "snd_hda_intel loaded and bound"
+else
+  R FAIL "audio:driver" "snd_hda_intel did not bind the controller"
+fi
+
+if aplay -l 2>/dev/null | grep -q '^card '; then
+  R PASS "audio:playback" "$(aplay -l 2>/dev/null | grep '^card ' | head -1 | cut -c1-58)"
+else
+  R FAIL "audio:playback" "ALSA lists no playback device"
+fi
+
+if arecord -l 2>/dev/null | grep -q '^card '; then
+  R PASS "audio:capture" "a capture device is present"
+else
+  R FAIL "audio:capture" "ALSA lists no capture device -- the mic path is gone"
+fi
+
+if timeout 5 aplay -D hw:0,0 -f S16_LE -r 44100 -c 2 -d 1 /dev/zero >/dev/null 2>&1; then
+  R PASS "audio:pcm-open" "opened hw:0,0 and wrote a second of samples"
+else
+  R FAIL "audio:pcm-open" "could not open and write the PCM"
+fi
+
+# Presence only. PipeWire is a per-user service and a serial root login has no
+# session for it to run in, so "is it installed and would it start" is the
+# honest limit here -- claiming more would be inventing a result.
+if dpkg -l wireplumber 2>/dev/null | grep -q '^ii'; then
+  R PASS "audio:userspace" "pipewire/wireplumber installed (not started: no user session)"
+else
+  R WARN "audio:userspace" "wireplumber not installed -- desktop audio would have no session manager"
 fi
 
 # ------------------------------------------------------------------ system

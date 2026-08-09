@@ -488,7 +488,7 @@ laptop's real two-tier swap rather than an approximation.
 **own** `check`/`status` subcommands rather than reimplementing them, because a
 second implementation drifts from the first and starts grading the wrong thing.
 The checks run *in the guest* — a dozen serial round trips cost minutes, and a
-remotely-driven check can only grade one line of output. **14 checks, all passing
+remotely-driven check can only grade one line of output. **21 checks, all passing
 on a healthy image**, across three tiers: artefact (survived the restore),
 mechanism (builds, loads, the rule acts), device (needs metal, not attempted).
 
@@ -504,6 +504,16 @@ Three things worth carrying:
   shows the rule matching it and writing `trigger=none`. It is the `udevadm test`
   output that is the evidence — a fresh `uleds` LED defaults to `none`, so
   reading the attribute back would pass with the rule deleted.
+- **Audio is the one area with a usable stand-in.** Wi-Fi and the camera can only
+  be *built* in a VM; audio can be exercised, because `bootdisk` gives the guest
+  an emulated `ich9-intel-hda`. Six checks: card, driver bound, playback,
+  capture, **PCM actually opened and written**, and userspace present. The
+  pcm-open one is what matters — enumeration proves a node exists, opening and
+  writing proves the path works. Not testable: the Cirrus CS4208's own quirks
+  (jack detection, routing, `model=` options), since QEMU's codec is generic; and
+  PipeWire, a per-user service with no session behind a serial root login.
+  `MBA_VMTEST_NO_AUDIO=1` removes the card and turns exactly the five hardware
+  checks red, which is what makes them evidence.
 - **`verify-control` proves the checks can fail.** Same discipline as
   `restore-test`'s unchanged control and `pull-test`'s all-7-wrong control: break
   three artefacts in a throwaway overlay, and **exactly 5 checks go red while 9
