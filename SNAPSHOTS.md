@@ -247,9 +247,28 @@ and `/root/**` that Timeshift appends itself.
 ## Bouncing between restore points
 
 Restore points are **not one-way**, and a restore does not consume the ones newer
-than it. The enabling detail is that `/timeshift/*` is in the exclude list, so a
-restore never touches the snapshot store: the restore log shows `timeshift/`
-exactly once, as `.d..t......`, a directory timestamp with no recursion into it.
+than it. **Tested on 2026-08-08: 14 of 14 checks across both hops.** The enabling
+detail is that `/timeshift/*` is in the exclude list, so a restore never touches
+the snapshot store: the restore log shows `timeshift/` exactly once, as
+`.d..t......`, a directory timestamp with no recursion into it.
+
+    A  2026-08-08_21-48-22   741,915 files   state.txt 8 bytes,  hello absent
+    B  2026-08-08_21-49-38   741,927 files   state.txt 49 bytes, hello installed
+
+    B -> A  (backwards, rolling past B)   7/7
+    A -> B  (forwards, into the rolled-past snapshot)   7/7
+
+What the backward hop showed is that `--delete` genuinely removes: `only-in-b.txt`
+disappeared from the live system and `hello` was uninstalled, while snapshot B
+kept its own `only-in-b.txt`, its 49-byte `state.txt`, its `file_count` of 741,927
+and its comment — rolling past it changed nothing about it. All four snapshots on
+disk survived both hops.
+
+The forward hop is the stronger test of the two, because `hello` had to be
+reconstructed from a snapshot the system had already moved past: afterwards
+`dpkg -V hello` reported no checksum discrepancies, all 15 paths in `dpkg -L`
+were present, and the binary ran. **The package database and the filesystem
+agree** — a restore does not leave dpkg believing something the disk contradicts.
 Combined with rsync-mode snapshots each being a *complete* hardlinked tree rather
 than a diff against a parent, any snapshot restores independently of the others,
 in any order, as often as you like.

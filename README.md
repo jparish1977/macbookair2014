@@ -900,10 +900,17 @@ restore rewinds `/var/log/apt/history.log`, which is the only thing
 
 No. A restore never touches the snapshot store (`/timeshift/*` is excluded), so
 snapshots newer than the one you restore survive being rolled past, and you can
-go forward into them again. `bounce-arm` builds two complete states, snapshots
-each, and `bounce-verify A|B` grades each hop — including that the snapshot you
-rolled *past* still exists **and still checksums correctly**, which is the only
-thing that makes the way back real.
+go forward into them again. **Tested 2026-08-08: 14 of 14 checks across both
+hops.** `bounce-arm` builds two complete states, snapshots each, and
+`bounce-verify A|B` grades each hop — including that the snapshot you rolled
+*past* still exists **and still checksums correctly**, which is the only thing
+that makes the way back real.
+
+The forward hop is the stronger of the two: `hello` had to be rebuilt from a
+snapshot the system had already moved past, and afterwards `dpkg -V` found no
+discrepancies, all 15 of its paths were present and the binary ran. The package
+database and the filesystem agree — a restore does not leave dpkg believing
+something the disk contradicts.
 
 Each state holds a file the other lacks, so every hop must both create and
 delete. A restore that only ever put files back would pass the one-way test and
