@@ -151,8 +151,38 @@ Step 1 and 2 below are done; step 3 is still optional and still not done.
    on purpose, which age cannot see — and points at `delete NAME`, which removes
    one snapshot without disturbing the rest. `--force` restores the old
    behaviour, and unlabelled snapshots still prune normally.
-3. **Optionally, rsync the snapshot tree to iteration8** over the tailnet as an
-   offsite copy. Local for rollback, remote for disk death. Do not invert this.
+3. **Rsync the snapshot tree to iteration8** over the tailnet as an offsite copy.
+   Local for rollback, remote for disk death. Do not invert this. **Implemented
+   as `snapshot-offsite.sh`** — deliberately a separate script, because merging
+   it with `system-snapshot.sh` is exactly the confusion this file exists to
+   prevent. Target `/srv/mba-snapshots` on iteration8: `/home` there is 92% full
+   while `/` has 1.6T free, and `/srv` is already where the kernel workshop
+   lives.
+
+   Three flags carry it, and each one wrong gives a copy that looks complete and
+   does not restore: `-H` (snapshots are hardlink trees — without it two
+   snapshots ship as ~37G rather than ~18.5G; note it does **not** disable
+   incremental recursion, so the transfer's percentage legitimately goes
+   backwards as rsync discovers more of the tree), `--fake-super` (an unprivileged
+   remote account stores real ownership and mode in a `user.rsync.%stat` xattr,
+   chosen over `--rsync-path="sudo rsync"` so it survives a change to the
+   remote's sudo policy), and `--partial-dir` (a 75-minute transfer over Wi-Fi
+   *will* be interrupted).
+
+   **Done 2026-08-08.** 1,483,788 files in 79m11s at ~3.8 MB/s over Wi-Fi,
+   occupying **20.03G** remotely against 38.69G apparent — `-H` saved 18.66G,
+   very nearly half, and that saving grows with every snapshot kept. `verify`
+   passed all three checks: every local snapshot present, no content differences
+   on a full dry-run comparison, and the `user.rsync.%stat` xattr confirmed on
+   `/etc/shadow` inside the remote copy.
+
+   The trap is on the way back: **pulling the tree home also needs
+   `--fake-super`, named on the remote side.** Omit it and rsync cheerfully
+   hands you a tree owned by your own user with every mode wrong, which looks
+   like it worked. `snapshot-offsite.sh restore-help` spells out the procedure.
+   **The pull is the one step never exercised** — the push and its verification
+   have been. Proving it costs a transfer into a spare directory, not a machine,
+   and until someone does it the last mile rests on reading the manual correctly.
 
 Do **not** set Timeshift's target to NFS from iteration8 and call it done. That
 is the configuration that fails in the one scenario it was installed for — and

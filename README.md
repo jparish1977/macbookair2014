@@ -28,6 +28,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 | [`apt-rollback.sh`](#apt-rollbacksh) | Undo a bad apt transaction precisely, from apt's own records |
 | [`system-snapshot.sh`](#system-snapshotsh) | A local known-good snapshot for when you *don't* know what changed |
 | [`restore-test.sh`](#restore-testsh) | Prove the restore works *before* you need it, with a control condition |
+| [`snapshot-offsite.sh`](#snapshot-offsitesh) | Copy the snapshot tree to another machine — for a dead disk, not a bad update |
 
 **Working out what is actually wrong**
 
@@ -944,6 +945,114 @@ reconstruction rather than a guaranteed byte-for-byte one.
 
 Snapshot before restoring — for a bounce it is not optional, since the forward
 destination has to exist before you hop backwards.
+
+## `snapshot-offsite.sh`
+
+The other half of the snapshot story: `/timeshift` lives on the same `sda` as
+`/`, so a dead disk takes the system *and* every snapshot with it. This copies
+the tree to another machine.
+
+    ./snapshot-offsite.sh status           what exists both ends, and whether a push can work
+    sudo ./snapshot-offsite.sh push        copy the tree (--dry-run, --mirror)
+    sudo ./snapshot-offsite.sh verify      compare both ends, transferring nothing
+    ./snapshot-offsite.sh watch [SECONDS]  readable progress for a push running elsewhere
+    ./snapshot-offsite.sh restore-help     how to get it back, and the trap on the way
+
+**Run for real on 2026-08-08**, two snapshots to `iteration8` over the tailnet:
+
+    79m 11s      1,483,788 files at ~3.8 MB/s over Wi-Fi
+    20.03G       occupied remotely
+    38.69G       apparent size -- so -H saved 18.66G, very nearly half
+    verify       all three checks passed
+
+`verify` is the part worth running: it re-compares the whole tree with the same
+flags `push` used, and confirms `/etc/shadow` in the remote copy really does carry
+its `user.rsync.%stat` xattr. That last check is the difference between a faithful
+copy and 20G that merely looks complete.
+
+It is deliberately a **separate script** from `system-snapshot.sh`, because the
+two jobs pull in opposite directions and merging them is precisely the mistake
+[`SNAPSHOTS.md`](#snapshotsmd) exists to prevent. Rollback must be **local** — the
+likeliest bad update here costs you the only network interface, so a snapshot on
+another host is unreachable exactly when you need it, and `system-snapshot.sh`
+*refuses* a network target. Disaster recovery must be **remote**, for the case
+where the disk itself is gone. Local for rollback, remote for disk death.
+
+Three flags carry the design, and getting any of them wrong yields a copy that
+looks complete and does not restore:
+
+**`-H` is not optional.** Each snapshot is a full tree whose unchanged files are
+hardlinks into the previous one. Without it, two snapshots ship as ~37G instead
+of ~18.5G and it worsens linearly.
+
+> An earlier version of this section claimed `-H` disables rsync's incremental
+> recursion and forces the whole file list into memory first. **That is wrong.**
+> Only `--delete-before`, `--delete-after`, `--prune-empty-dirs` and
+> `--delay-updates` disable it. `-H` costs memory for the inode→path table it
+> needs to spot links, but rsync still scans and transfers concurrently.
+>
+> The visible consequence is a **progress percentage that goes backwards**: it
+> reached 98% of the first snapshot, then recursed into the second, added the
+> newly-discovered work to the denominator, and fell to 86%. It is a percentage
+> of a total rsync has not finished discovering. It also explains why both
+> snapshot directories appear on the remote within seconds — incremental
+> recursion creates subdirectories before recursing into them, so their presence
+> says nothing about progress.
+>
+> One real caveat comes with it: with incremental recursion active, `-H` may send
+> a file's data before finding another link to it later. That costs bytes, never
+> correctness — the hardlinks are still built correctly. Sorting works in our
+> favour here, since the oldest snapshot is the one the others link into and it
+> transfers first. `--no-inc-recursive` would eliminate the waste at the cost of
+> a long silent scan before anything moves.
+
+**`--fake-super`** lets an unprivileged remote account hold a faithful root-owned
+tree: real ownership and mode go into a `user.rsync.%stat` xattr. This was chosen
+over `--rsync-path="sudo rsync"` even though the remote *has* passwordless sudo,
+because it keeps working if that policy ever changes. `status` checks the target
+filesystem actually supports user xattrs instead of assuming it.
+
+**`--partial-dir`** because 75 minutes over Wi-Fi will eventually be interrupted,
+and the default behaviour is to discard the partial file and start that file over.
+
+`push` also holds off idle-suspend with `systemd-inhibit` for the duration of the
+transfer — scoped to the command, so there is no power setting left changed
+afterwards. Lid-close is a separate switch it cannot cover.
+
+### Two measurement mistakes worth not repeating
+
+**`du -sb` answers a different question than "will this fit".** The pre-flight
+used it to size the tree and got 17.7G, while the remote ended up occupying
+20.03G. `-b` is *apparent* size — the sum of file sizes — but what the
+destination must find is *allocated blocks*, and with ~740k small files each
+rounding up to 4K the gap is over 10%. A space check against the apparent number
+is a check against a figure that is always too small. It now uses `du -s -B1`.
+
+The same confusion nearly produced a phantom bug: 17.7G local against 20.03G
+remote looked like `--fake-super` was costing a 4K block per file for its xattr.
+It isn't — the value is `100644 0,0 0:0`, about 35 bytes, and fits inline in this
+filesystem's 256-byte inodes. The two numbers simply were not measuring the same
+thing.
+
+**`watch` reads `df`, not `du`.** The obvious implementation polls `du` on the
+remote tree, which is ~1.5M stat calls and took ~40 seconds per sample — longer
+than any sensible poll interval, so the watcher spent all its time measuring and
+printed nothing. `df` returns instantly. The trade-off is that it tracks the
+whole filesystem, so another writer on that host would look like progress.
+
+### The failure that pointed at the wrong thing
+
+The first `sudo push` died with *"cannot reach"*, immediately after an
+unprivileged `status` had reported the host reachable. Wi-Fi was fine. Under
+`sudo`, `$HOME` becomes `/root`, so ssh consulted `/root/.ssh/known_hosts`, which
+had never seen the host — and `BatchMode=yes` cannot prompt to accept a new host
+key, so it failed with `Host key verification failed`.
+
+The script now points ssh at the *invoking user's* `known_hosts`, reusing trust
+already established rather than disabling host-key checking, which is the other
+common way to make this symptom disappear. The failure path also prints ssh's own
+words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
+sent the first investigation at the network, which was never the problem.
 
 ## `sysfs-watch.sh` and `who-writes.sh`
 
