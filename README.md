@@ -971,6 +971,17 @@ flags `push` used, and confirms `/etc/shadow` in the remote copy really does car
 its `user.rsync.%stat` xattr. That last check is the difference between a faithful
 copy and 20G that merely looks complete.
 
+**Which host holds your copy is site config, not part of the repo.** Put it in
+`.offsite.conf` next to the script (gitignored) or in the environment:
+
+    OFFSITE_HOST=100.x.y.z        # tailnet address of the backup host
+    OFFSITE_USER=you              # defaults to $(id -un)
+    OFFSITE_DIR=/srv/mba-snapshots
+
+Without it the script says exactly that rather than failing obscurely. Use the
+**tailnet** address, not an ssh alias — `iteration8` resolves to `iteration8.local`,
+which only works on that host's own LAN.
+
 It is deliberately a **separate script** from `system-snapshot.sh`, because the
 two jobs pull in opposite directions and merging them is precisely the mistake
 [`SNAPSHOTS.md`](#snapshotsmd) exists to prevent. Rollback must be **local** — the

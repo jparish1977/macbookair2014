@@ -61,13 +61,34 @@ SNAPDIR=/timeshift/snapshots
 # ssh key. Deriving it also keeps this script working for someone who is not joe.
 home_of_caller() { getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6; }
 
-# Overridable so this is not welded to one machine.
-REMOTE_HOST="${MBA_OFFSITE_HOST:-100.109.232.15}"   # tailnet IP on purpose: the
-                                                    # `iteration8` ssh alias points
-                                                    # at iteration8.local, which
-                                                    # resolves only on its own LAN.
-REMOTE_USER="${MBA_OFFSITE_USER:-joe}"
-REMOTE_DIR="${MBA_OFFSITE_DIR:-/srv/mba-snapshots}"
+# Where your copy goes is site config, not something a shared script should carry.
+# Precedence: environment, then an untracked local file, then a placeholder that
+# makes the script say what is missing rather than fail obscurely.
+#
+# Use the TAILNET address rather than an ssh alias: the `iteration8` alias points
+# at iteration8.local, which resolves only on that host's own LAN.
+OFFSITE_CONF="${MBA_OFFSITE_CONF:-$(dirname "${BASH_SOURCE[0]}")/.offsite.conf}"
+# shellcheck disable=SC1090
+[ -r "$OFFSITE_CONF" ] && . "$OFFSITE_CONF"
+
+REMOTE_HOST="${MBA_OFFSITE_HOST:-${OFFSITE_HOST:-}}"
+REMOTE_USER="${MBA_OFFSITE_USER:-${OFFSITE_USER:-$(id -un)}}"
+REMOTE_DIR="${MBA_OFFSITE_DIR:-${OFFSITE_DIR:-/srv/mba-snapshots}}"
+
+if [ -z "$REMOTE_HOST" ]; then
+  cat >&2 <<EOF
+error: no offsite host configured.
+
+  Create $OFFSITE_CONF (it is gitignored):
+
+      OFFSITE_HOST=100.x.y.z        # tailnet address of the backup host
+      OFFSITE_USER=you              # optional, defaults to \$(id -un)
+      OFFSITE_DIR=/srv/mba-snapshots
+
+  or set MBA_OFFSITE_HOST in the environment.
+EOF
+  exit 1
+fi
 
 CALLER_HOME="$(home_of_caller)"
 SSH_KEY="${MBA_OFFSITE_KEY:-$CALLER_HOME/.ssh/id_ed25519_iteration8}"
@@ -124,7 +145,7 @@ This is DISASTER RECOVERY -- for a dead disk. For rolling back a bad update use
 ./system-snapshot.sh (local) or ./apt-rollback.sh (precise). Never point timeshift
 itself at the network: see the header of this script and SNAPSHOTS.md.
 
-Override the target with MBA_OFFSITE_HOST / _USER / _DIR / _KEY.
+Target host comes from .offsite.conf (untracked) or MBA_OFFSITE_HOST/_USER/_DIR/_KEY.
 EOF
   exit 1
 }
