@@ -1255,10 +1255,11 @@ laptop.
     ./vm-restore-test.sh prepare      fetch the ISO, make disks, patch the initrd
     ./vm-restore-test.sh serve        rsync daemon that decodes --fake-super
     ./vm-restore-test.sh boot         launch the VM headless, serial on a socket
+    ./vm-restore-test.sh restore      the whole restore unattended -> golden.qcow2
     ./vm-restore-test.sh sh "CMD"     run a command in the guest
     ./vm-restore-test.sh bootdisk     boot the RESTORED system (network restricted)
     ./vm-restore-test.sh screenshot   capture its framebuffer -- it has no serial console
-    ./vm-restore-test.sh steps        the in-guest restore procedure
+    ./vm-restore-test.sh steps        the same restore by hand, and why each step is like that
     ./vm-restore-test.sh status       what exists, what is running
     ./vm-restore-test.sh stop|clean   teardown that never touches other VMs
 
@@ -1279,6 +1280,64 @@ LightDM greeter — hostname `joe-MacBookAir`, user `Joe`, the right theme.
 The greeter offers `Joe` but `/home/joe` is empty, which is correct: these
 snapshots are system-only. This restores *the machine*, not your files — those
 live in the separate `~/backups/mba-home/` copy.
+
+### `restore` — the same thing, unattended
+
+That first run was six steps driven by hand over a serial console. Fine once,
+useless as something to re-run whenever a snapshot changes. `restore` does the
+whole thing and ends in **`golden.qcow2`**, a frozen image of the restored
+machine:
+
+    ./vm-restore-test.sh restore              # newest snapshot
+    ./vm-restore-test.sh restore 2026-08-09_02-41-39
+
+It reads the original root UUID and ESP volume id out of the snapshot's own
+fstab, builds the disk to match, pulls the tree, seeds Timeshift's config, drives
+the prompts with `expect`, checks the result and freezes the image. `steps` stays
+as the by-hand version and the explanation of why each step looks like that.
+
+**The work is detached inside the guest and this side only polls.** The serial
+helper drains for a fixed number of seconds per exchange — it cannot recognise a
+shell prompt or wait for one. So the driver runs under `setsid`, writes one line
+to `/tmp/g.status` and its transcript to `/tmp/g.log`; the serial link carries
+status, never the work. Steps shorter than the 20s poll go by unprinted, and
+`sh 'cat /tmp/g.log'` has the rest.
+
+**It pulls one snapshot, not the module.** The carrier is 30G and the offsite
+copy is ~20G of hardlinked snapshots with a 38G apparent size, which a pull
+expands. One snapshot is a complete tree by itself, and pulling it straight into
+`timeshift/snapshots/` removes the `mv` the manual procedure needs.
+
+It refuses rather than guesses if the snapshot's fstab mounts anything past `/`,
+`/boot/efi` and the swapfile — it builds a two-partition disk, and a restored
+system whose fstab names a filesystem nobody created boots to an emergency shell
+and reads like a restore bug. And `clean` deliberately **keeps** `golden.qcow2`:
+it costs an hour to make, everything downstream boots from it, and deleting it
+there would make `clean` mean two different things depending on what had run.
+
+#### Three things only a real run found
+
+Two of them fail silently, which is why the first run had to happen:
+
+- **`apt-get update` exits non-zero in the live session.** Its `sources.list`
+  carries a `cdrom:` entry for the ISO, and that has no Release file when the VM
+  boots via `-kernel`/`-initrd` instead of letting casper mount the disc. Every
+  network list fetches fine. Drop the entry and gate on the *install*, which
+  fails plainly if the lists never arrived.
+- **Bash prints its bracketed-paste escape on the same line as the output.**
+  `cat /tmp/g.status` returns `ESC[?2004lDONE:rc=10`, so anything anchored with
+  `^` never matches. The first run polled to its full timeout against a guest
+  that had already failed and was sitting there saying so. Strip
+  `ESC[…[a-zA-Z]` along with the `\r`s before grepping a serial line.
+- **A marker echoed back by the console matches before the command runs.**
+  `guest "rsync … && echo PULLED" | grep PULLED` passes whether the rsync worked
+  or not, because the link echoes the command text first. Spell it
+  `echo P''ULLED` and only the shell's own output matches.
+
+And one from driving it rather than from the script: **`pkill -f "…restore"`
+killed the ssh session that issued it**, the pattern being in its own command
+line. This script's header already warns about that for `pgrep`; use a character
+class — `rest[o]re` — so a pattern cannot match itself.
 
 ### The clone fights the original for its identity
 

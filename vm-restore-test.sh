@@ -91,6 +91,7 @@ TARGET_GB=40
 CARRIER_GB=30
 
 die()  { echo "error: $*" >&2; exit 1; }
+say()  { echo; echo "  == $*"; }
 warn() { echo "  WARN  $*"; }
 ok()   { echo "  ok    $*"; }
 bad()  { echo "  FAIL  $*"; }
@@ -113,10 +114,12 @@ usage() {
 usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autologin
        $0 serve          start the loopback rsync daemon that decodes --fake-super
        $0 boot           launch the VM headless, serial on a unix socket
+       $0 restore [SNAP] do the whole restore unattended, ending in golden.qcow2
+                         (defaults to the newest snapshot)
        $0 sh "COMMAND"   run a command in the guest and print what it says
        $0 bootdisk       boot the RESTORED system off the disk (network restricted)
        $0 screenshot     capture the guest's framebuffer (it has no serial console)
-       $0 steps          the in-guest restore procedure
+       $0 steps          the same restore by hand, and why each step is like that
        $0 status         what exists and what is running
        $0 stop           stop OUR vm and daemon (never touches other VMs)
        $0 clean          stop, then delete the disks (keeps the ISO)
@@ -245,6 +248,13 @@ log file  = $WORK/rsyncd.log
     path = $SNAPSRC
     read only = true
     fake super = yes
+# How the guest gets the restore driver. NOT fake super: this module serves
+# ordinary files that want their own modes, and decoding would corrupt them.
+# rsync re-reads this config on every connection, so adding a module does not
+# need the daemon restarted.
+[vmtest]
+    path = $WORK
+    read only = true
 EOF
   pgrep -f "^rsync --daemon --config=$WORK" >/dev/null && { ok "daemon already running"; return 0; }
   ( rsync --daemon --config="$WORK/rsyncd.conf" --port="$RSYNC_PORT" --address=127.0.0.1 >/dev/null 2>&1 & )
@@ -496,6 +506,307 @@ cmd_steps() {
 EOF
 }
 
+# -------------------------------------------------------------------- restore
+
+# Everything `steps` describes, run unattended, ending in golden.qcow2.
+#
+# WHY THIS IS NOT JUST `sh` CALLED SIX TIMES
+#
+# Two steps -- the tree pull and the restore itself -- run for tens of minutes,
+# and the serial helper drains for a fixed number of seconds per exchange. It
+# has no idea what a shell prompt looks like and cannot wait for one. So the
+# work is DETACHED inside the guest, writes one line to /tmp/g.status, and this
+# side polls that file. The serial link carries status, never the work.
+#
+# WHY IT PULLS ONE SNAPSHOT RATHER THAN THE WHOLE MODULE
+#
+# The carrier is ${CARRIER_GB}G; the offsite copy is ~20G of HARDLINKED snapshots whose
+# apparent size is 38G, and a pull expands every hardlink. The module would not
+# fit and would spend most of its time on snapshots nothing here restores. One
+# snapshot is a complete tree on its own. Pulling it straight into
+# timeshift/snapshots/ also removes the `mv` that step 4 needs by hand.
+#
+# WHY IT MATCHES UUIDS INSTEAD OF ANSWERING THE PROMPTS
+#
+# Both work by hand; only matching works unattended. What makes this dangerous
+# on real hardware -- two filesystems sharing a UUID -- cannot arise here: the
+# target is a qcow2 that never coexists with the laptop.
+
+# The ORIGINAL identifiers, read from the snapshot's own fstab. Nothing else
+# knows them once the disk is gone, and timeshift matches mount points on them.
+fstab_field() {   # $1=fstab  $2=mount point  $3=field number -> value or empty
+  awk -v m="$2" -v f="$3" '!/^#/ && NF>=3 && $2==m {print $f; exit}' "$1"
+}
+
+# One exchange with the guest, cleaned up enough to grep.
+#
+# Two things have to come off first, and the second cost a whole run:
+#
+#   \r          serial line endings
+#   ESC[?2004l  bash's BRACKETED PASTE off/on sequence, which it emits on the
+#               SAME LINE as the first line of output. So `cat /tmp/g.status`
+#               comes back as "ESC[?2004lDONE:rc=10" and any pattern anchored
+#               with ^ silently never matches -- the poll below ran to its full
+#               timeout against a guest that had already finished.
+guest() {
+  python3 "$WORK/conv.py" "$WORK/serial.sock" "" 1 "$1" "${2:-8}" 2>/dev/null \
+    | tr -d '\r' | sed 's/\x1b\[[0-9?;]*[a-zA-Z]//g'
+}
+
+cmd_restore() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  local snap="${1:-}"
+  [ -n "$snap" ] || snap=$(ls -1 "$SNAPSRC" 2>/dev/null | sort | tail -1)
+  [ -n "$snap" ] || die "no snapshots in $SNAPSRC"
+  [ -d "$SNAPSRC/$snap" ] || die "no such snapshot: $snap"
+
+  local fstab="$SNAPSRC/$snap/localhost/etc/fstab"
+  [ -r "$fstab" ] || die "cannot read the snapshot's fstab at $fstab"
+
+  # Refuse a layout this cannot rebuild rather than restoring a system whose
+  # fstab names a filesystem that was never created. It would boot into an
+  # emergency shell and look like a restore bug.
+  local extra
+  extra=$(awk '!/^#/ && NF>=3 && $3!="swap" && $2!="/" && $2!="/boot/efi" {print $2}' "$fstab")
+  if [ -n "$extra" ]; then
+    bad "the snapshot's fstab mounts more than / and /boot/efi:"
+    echo "$extra" | sed 's/^/        /'
+    die "this builds a two-partition disk only -- restore that layout by hand with '$0 steps'"
+  fi
+
+  local root_src esp_src root_type esp_type root_uuid esp_id
+  root_src=$(fstab_field "$fstab" "/" 1);         root_type=$(fstab_field "$fstab" "/" 3)
+  esp_src=$(fstab_field "$fstab" "/boot/efi" 1);  esp_type=$(fstab_field "$fstab" "/boot/efi" 3)
+  case "$root_src" in UUID=*) root_uuid="${root_src#UUID=}" ;; *) die "root is not UUID-based: $root_src" ;; esac
+  case "$esp_src"  in UUID=*) esp_id=$(echo "${esp_src#UUID=}" | tr -d '-') ;; *) die "ESP is not UUID-based: $esp_src" ;; esac
+  [ "$root_type" = ext4 ] || die "root is $root_type, not ext4 -- adjust cmd_restore before trusting it"
+  [ "$esp_type" = vfat ]  || die "/boot/efi is $esp_type, not vfat"
+
+  echo
+  info "snapshot   $snap"
+  info "root       ext4  UUID=$root_uuid          -> /dev/sda2"
+  info "ESP        vfat  volume id $esp_id        -> /dev/sda1"
+  info "golden     $WORK/golden.qcow2"
+  echo
+
+  if [ -s "$WORK/golden.qcow2" ]; then
+    warn "golden.qcow2 already exists ($(du -h "$WORK/golden.qcow2" | cut -f1)) and will be REPLACED at the end"
+  fi
+
+  # Bring up the pieces this needs. All three are idempotent.
+  [ -s "$WORK/target.qcow2" ] && [ -s "$WORK/carrier.qcow2" ] || die "no disks -- run '$0 prepare' first"
+  cmd_serve || die "the rsync daemon is not serving a decoded tree -- fix that first"
+  cmd_boot  || die "could not start the VM"
+
+  # The driver, fetched by the guest over the vmtest module. Sending a multi-KB
+  # script down the serial line would be at the mercy of every echo and control
+  # character on the way; rsync is already there and is exact.
+  cat > "$WORK/guest-restore.sh" <<'GUEST'
+#!/bin/sh
+# Runs as root INSIDE the live session, detached. Driven by vm-restore-test.sh
+# restore -- see the commentary there. Progress goes to /tmp/g.status (one line,
+# overwritten) and the full transcript to stdout, which the caller redirects.
+set -u
+SNAP="$1"; ROOT_UUID="$2"; ESP_ID="$3"; PORT="$4"
+CARRIER=/mnt/carrier
+SNAPDIR="$CARRIER/timeshift/snapshots/$SNAP"
+
+step() { echo "STEP $*" > /tmp/g.status; echo "=== STEP $*"; }
+fail() { echo "DONE:rc=$1" > /tmp/g.status; echo "=== FAILED at rc=$1: $2"; exit "$1"; }
+
+step "1/7 installing tools"
+export DEBIAN_FRONTEND=noninteractive
+# The live session's sources.list carries a `cdrom:` entry for the ISO it booted
+# from, and that entry has no Release file here -- we boot with -kernel/-initrd
+# rather than letting casper mount the disc as an apt source. apt-get update then
+# exits non-zero having fetched every network list perfectly well. Drop the entry,
+# and do not gate on update's exit code either way: the install is the real test,
+# and it fails plainly if the lists never arrived.
+sed -i '/^deb cdrom:/d' /etc/apt/sources.list 2>/dev/null
+apt-get update -qq 2>&1 | grep -v "^$" | sed 's/^/    /'
+apt-get install -y -qq gdisk dosfstools timeshift expect || fail 10 "apt-get install"
+
+step "2/7 partitioning /dev/sda"
+sgdisk -Z /dev/sda >/dev/null 2>&1
+sgdisk -n1:0:+512M -t1:ef00 -c1:EFI -n2:0:0 -t2:8300 -c2:root /dev/sda || fail 11 "sgdisk"
+# The kernel needs telling, and udev needs to catch up, or mkfs races the
+# partition nodes into existence and fails with "No such file or directory".
+partprobe /dev/sda 2>/dev/null || blockdev --rereadpt /dev/sda 2>/dev/null
+udevadm settle 2>/dev/null; sleep 2
+[ -b /dev/sda1 ] && [ -b /dev/sda2 ] || fail 11 "partition nodes never appeared"
+
+step "3/7 formatting with the ORIGINAL uuids"
+mkfs.vfat -F32 -i "$ESP_ID" /dev/sda1 >/dev/null || fail 12 "mkfs.vfat"
+mkfs.ext4 -qF -U "$ROOT_UUID" /dev/sda2         || fail 12 "mkfs.ext4"
+
+step "4/7 pulling $SNAP onto the carrier"
+mkfs.ext4 -qF /dev/sdb        || fail 13 "mkfs.ext4 on the carrier"
+mkdir -p "$CARRIER"
+mount /dev/sdb "$CARRIER"     || fail 13 "mount carrier"
+# Only now, so the tree lands on the carrier rather than under its mount point.
+# Timeshift looks in <device>/timeshift/snapshots/, which is why the pull
+# targets that path instead of the device root.
+mkdir -p "$SNAPDIR"
+# The daemon decodes --fake-super on the way out; this side must NOT name it.
+rsync -aHAX --numeric-ids "rsync://10.0.2.2:$PORT/snapshots/$SNAP/" "$SNAPDIR/" \
+  || fail 14 "rsync pull"
+
+step "5/7 checking the pull before restoring from it"
+# If sudo is not setuid here, everything downstream is broken and it is far
+# cheaper to stop now than to find out from a system that boots and cannot
+# escalate. This is the single check that catches a mis-decoded archive.
+mode=$(stat -c %A "$SNAPDIR/localhost/usr/bin/sudo" 2>/dev/null)
+case "$mode" in
+  -rwsr-xr-x*) echo "    sudo is $mode -- setuid survived the pull" ;;
+  *)           fail 15 "sudo came through as '$mode', expected -rwsr-xr-x" ;;
+esac
+[ -f "$SNAPDIR/localhost/etc/shadow" ] || fail 15 "no /etc/shadow in the pulled tree"
+
+step "6/7 seeding timeshift and restoring"
+# On a live session timeshift has no config, enters first-run mode and prompts
+# for a backup device -- a prompt --snapshot-device does not answer. Seed the
+# config instead. blkid needs root here or it returns nothing and the config
+# ends up reporting "Device : Not Selected".
+U=$(blkid -o value -s UUID /dev/sdb)
+[ -n "$U" ] || fail 16 "no UUID on the carrier"
+mkdir -p /etc/timeshift
+printf '{"backup_device_uuid":"%s","btrfs_mode":"false","do_first_run":"false"}\n' "$U" \
+  > /etc/timeshift/timeshift.json
+timeshift --list || fail 16 "timeshift cannot see the snapshots"
+
+# expect, not `yes`: the sequence is ENTER, then two y/n prompts, so `yes`
+# answers the first wrongly and `yes ""` answers the last two wrongly.
+# No --skip-grub: unlike a same-machine rollback, here we DO want a bootloader.
+cat > /root/restore.exp <<'EXP'
+set timeout 7200
+set snap [lindex $argv 0]
+spawn timeshift --restore --snapshot $snap --target /dev/sda2 --grub-device /dev/sda
+expect {
+    -re "Press ENTER to continue"        { send "\r";  exp_continue }
+    -re "Re-install GRUB2 bootloader.*:" { send "y\r"; exp_continue }
+    -re "Continue with restore.*:"       { send "y\r"; exp_continue }
+    -re "Enter device name or number.*:" { send "\r";  exp_continue }
+    eof
+}
+catch wait result
+exit [lindex $result 3]
+EXP
+expect -f /root/restore.exp "$SNAP" > /tmp/restore.out 2>&1
+rc=$?
+cat /tmp/restore.out
+# An EMPTY "Data will be modified on:" table is how a failed mount mapping
+# presents -- timeshift prints no error and can still exit 0. Check the table.
+grep -q "/dev/sda2" /tmp/restore.out || fail 17 "timeshift's device table never named /dev/sda2 -- the UUID mapping failed"
+[ "$rc" = 0 ] || fail 17 "timeshift exited $rc"
+
+step "7/7 verifying the restored disk"
+mkdir -p /mnt/t
+mount /dev/sda2 /mnt/t || fail 18 "cannot mount the restored root"
+mount /dev/sda1 /mnt/t/boot/efi 2>/dev/null
+for f in /mnt/t/etc/fstab /mnt/t/usr/bin/sudo /mnt/t/boot/grub/grub.cfg; do
+  [ -e "$f" ] || fail 18 "missing after restore: $f"
+done
+case "$(stat -c %A /mnt/t/usr/bin/sudo)" in
+  -rwsr-xr-x*) ;; *) fail 18 "restored sudo is not setuid" ;;
+esac
+ls /mnt/t/boot/efi/EFI >/dev/null 2>&1 || fail 18 "the ESP has no EFI directory -- grub was not installed"
+echo "    kernels on the restored disk:"; ls /mnt/t/boot/vmlinuz-* 2>/dev/null | sed 's/^/      /'
+
+# Unmount and sync before the host freezes the image, or golden.qcow2 captures a
+# filesystem with a dirty journal.
+umount /mnt/t/boot/efi 2>/dev/null
+umount /mnt/t          || fail 19 "could not unmount the restored root"
+umount "$CARRIER"      2>/dev/null
+sync
+echo "DONE:rc=0" > /tmp/g.status
+echo "=== restore complete"
+GUEST
+  chmod 755 "$WORK/guest-restore.sh"
+
+  # Wait for the live session. `id` is the readiness probe because its OUTPUT
+  # (uid=) cannot appear in the echo of the command itself -- a probe that greps
+  # for its own marker matches the echo and passes before the guest is up.
+  say "waiting for the live session"
+  local i=0 up=0
+  while [ "$i" -lt 40 ]; do
+    guest "id" 4 | grep -q "uid=" && { up=1; break; }
+    i=$((i + 1)); sleep 5
+  done
+  [ "$up" = 1 ] || die "no live session on the serial console after ~3 min -- '$0 status', then see $WORK/qemu.log"
+  ok "live session is up"
+
+  # P''ULLED, not PULLED, and the same trick below. The serial link echoes the
+  # command back before running it, so a marker spelled plainly appears in the
+  # output whether or not the command worked -- the check passes on failure.
+  # Splitting it with a quote makes the echo read P''ULLED and only the shell's
+  # own output read PULLED.
+  guest "rsync -a rsync://10.0.2.2:$RSYNC_PORT/vmtest/guest-restore.sh /tmp/g.sh && echo P''ULLED" 20 \
+    | grep -q "^PULLED" || die "the guest could not fetch the driver from the vmtest module"
+  ok "driver in the guest"
+
+  say "restoring $snap -- this runs for tens of minutes"
+  info "the VM does the work; this only polls /tmp/g.status"
+  guest "sudo sh -c 'setsid /tmp/g.sh $snap $root_uuid $esp_id $RSYNC_PORT >/tmp/g.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 \
+    | grep -q "^LAUNCHED" || die "could not launch the driver in the guest"
+
+  local timeout="${MBA_VMTEST_RESTORE_TIMEOUT:-10800}"
+  local waited=0 last="" line rc=""
+  while [ "$waited" -lt "$timeout" ]; do
+    sleep 20; waited=$((waited + 20))
+    line=$(guest "cat /tmp/g.status" 5 | grep -E '^(STEP|DONE:rc=)' | tail -1)
+    case "$line" in
+      DONE:rc=*) rc="${line#DONE:rc=}"; break ;;
+      STEP*)     [ "$line" = "$last" ] || { last="$line"; info "$(printf '%5sm  ' $((waited / 60)))$line"; } ;;
+    esac
+  done
+
+  if [ -z "$rc" ]; then
+    bad "no verdict after $((timeout / 60)) minutes"
+    info "the guest may still be working. Look with:  $0 sh 'tail -20 /tmp/g.log'"
+    return 1
+  fi
+  if [ "$rc" != 0 ]; then
+    bad "the restore failed inside the guest (rc=$rc)"
+    guest "tail -25 /tmp/g.log" 10 | sed 's/^/        /'
+    info ""
+    info "The VM is left running so you can look around:  $0 sh 'COMMAND'"
+    return 1
+  fi
+  ok "restore verified inside the guest"
+
+  # Freeze it. `convert` rather than `cp` because it drops the qcow2 slack a 40G
+  # disk accumulates, and because the copy is read afterwards -- a truncated one
+  # would be found now rather than at the next boot test.
+  say "freezing golden.qcow2"
+  # Capture the pid BEFORE stopping: cmd_stop removes the pidfile, so asking
+  # afterwards gets nothing back and there is nothing left to wait on.
+  local qpid; qpid=$(our_qemu)
+  cmd_stop >/dev/null 2>&1
+  # And wait for it to actually go. qemu-img takes an exclusive lock and fails
+  # with "Failed to get shared 'write' lock" while the VM still holds the image;
+  # a fixed sleep is a race, and losing it throws away the whole run at the last
+  # step.
+  for i in $(seq 1 30); do
+    [ -n "$qpid" ] && kill -0 "$qpid" 2>/dev/null || break
+    sleep 1
+  done
+  if [ -n "$qpid" ] && kill -0 "$qpid" 2>/dev/null; then
+    die "qemu (pid $qpid) will not exit -- refusing to copy an image it still holds"
+  fi
+  rm -f "$WORK/golden.qcow2"
+  qemu-img convert -O qcow2 "$WORK/target.qcow2" "$WORK/golden.qcow2" || die "qemu-img convert failed"
+  qemu-img check "$WORK/golden.qcow2" >/dev/null 2>&1 || die "golden.qcow2 does not check out"
+  ok "golden.qcow2 written ($(du -h "$WORK/golden.qcow2" | cut -f1)), from $snap"
+
+  echo
+  info "Boot it to confirm the whole path end to end:"
+  info "  cp golden.qcow2 target.qcow2 && $0 bootdisk && sleep 90 && $0 screenshot"
+  info ""
+  info "Never give a restored clone real network access while the laptop is"
+  info "running -- bootdisk uses restrict=on for that reason. See the header."
+  echo
+}
+
 # ------------------------------------------------------------ status / teardown
 
 cmd_status() {
@@ -505,7 +816,7 @@ cmd_status() {
   echo
   [ -d "$WORK" ] || { info "not prepared yet"; echo; return 0; }
   local f
-  for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2; do
+  for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2 golden.qcow2; do
     [ -e "$WORK/$f" ] && printf '  %-28s %s\n' "$f" "$(du -h "$WORK/$f" | cut -f1)" \
                       || printf '  %-28s %s\n' "$f" "missing"
   done
@@ -539,13 +850,20 @@ cmd_stop() {
 cmd_clean() {
   cmd_stop
   rm -f "$WORK/target.qcow2" "$WORK/carrier.qcow2" "$WORK/vars.fd"
-  ok "deleted the disks. ISO and patched initrd kept -- 'prepare' is quick now."
+  ok "deleted the working disks. ISO and patched initrd kept -- 'prepare' is quick now."
+  # golden.qcow2 is the expensive artefact -- an hour of restore -- and it is
+  # what anything downstream boots from. Deleting it here would make `clean`
+  # mean two very different things depending on what had been run.
+  if [ -s "$WORK/golden.qcow2" ]; then
+    info "golden.qcow2 kept ($(du -h "$WORK/golden.qcow2" | cut -f1)). Delete it by hand if you mean to."
+  fi
 }
 
 case "${1:-status}" in
   prepare) cmd_prepare ;;
   serve)   cmd_serve ;;
   boot)    cmd_boot ;;
+  restore) cmd_restore "${2:-}" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
   bootdisk)   cmd_bootdisk ;;
   screenshot) cmd_screenshot "${2:-}" ;;

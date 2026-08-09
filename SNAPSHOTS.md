@@ -394,6 +394,72 @@ Three things bite when bouncing, none of them Timeshift's fault:
 - **Every hop rewinds `/var/log/apt/history.log`,** so `apt-rollback.sh`'s view of
   history changes under you each time.
 
+## The rehearsal, automated
+
+The 2026-08-09 rehearsal proved the disaster path works, but it was six manual
+steps driven by hand over a serial console — fine once, useless as something to
+re-run whenever a snapshot changes. `vm-restore-test.sh restore` now runs the
+whole thing unattended and ends in **`golden.qcow2`**, a frozen image of the
+restored machine. `steps` is kept as the by-hand version and the explanation of
+*why* each step is shaped the way it is.
+
+    ./vm-restore-test.sh restore [SNAP]      # defaults to the newest snapshot
+
+It reads the ORIGINAL root UUID and ESP volume id out of the snapshot's own
+fstab, builds the disk to match, pulls the tree, seeds Timeshift's config, drives
+the restore prompts with `expect`, verifies the result and freezes the image.
+Three decisions in it are worth keeping:
+
+- **The work is detached inside the guest and the host only polls.** The serial
+  helper drains for a fixed number of seconds per exchange — it has no idea what
+  a shell prompt looks like and cannot wait for one. So the driver runs under
+  `setsid`, writes one line to `/tmp/g.status` and its full transcript to
+  `/tmp/g.log`. The serial link carries status, never the work. A step shorter
+  than the 20s poll interval never gets printed; `sh 'cat /tmp/g.log'` has
+  everything.
+- **It pulls one snapshot, not the whole module.** The carrier is 30G and the
+  offsite copy is ~20G of *hardlinked* snapshots with a 38G apparent size, which
+  a pull expands. The module would not fit. One snapshot is a complete tree on
+  its own, and pulling it straight into `timeshift/snapshots/` removes the `mv`
+  the manual procedure needs.
+- **It matches UUIDs rather than answering the prompts.** Both work by hand;
+  only matching works unattended. What makes this dangerous on real hardware —
+  two filesystems sharing a UUID — cannot arise against a qcow2 that never
+  coexists with the laptop.
+
+It refuses rather than guesses if the snapshot's fstab mounts anything beyond
+`/`, `/boot/efi` and the swapfile: it builds a two-partition disk, and restoring
+a system whose fstab names a filesystem that was never created would boot to an
+emergency shell and read as a restore bug.
+
+`clean` deliberately keeps `golden.qcow2`. It costs an hour to make and is what
+anything downstream boots from; deleting it there would make `clean` mean two
+different things depending on what had been run.
+
+### Three bugs it took a real run to find
+
+None of these would have shown up in a dry run, and two of them fail *silently*:
+
+- **`apt-get update` exits non-zero in the live session** because its
+  `sources.list` carries a `cdrom:` entry for the ISO, which has no Release file
+  when the VM boots via `-kernel`/`-initrd` rather than letting casper mount the
+  disc. Every network list fetches perfectly well. Drop the entry and gate on the
+  *install* instead — that fails plainly if the lists never arrived.
+- **Bash emits its bracketed-paste escape on the same line as the output.**
+  `cat /tmp/g.status` comes back as `ESC[?2004lDONE:rc=10`, so a pattern anchored
+  with `^` never matches. The first run polled to its full timeout against a
+  guest that had already failed and was sitting there saying so. Strip
+  `ESC[…[a-zA-Z]` alongside the `\r`s before grepping anything off a serial line.
+- **A marker echoed back by the serial console matches before the command runs.**
+  `guest "rsync … && echo PULLED" | grep PULLED` passes whether or not the rsync
+  worked, because the link echoes the command text first. Spell the marker
+  `echo P''ULLED` so only the shell's own output matches.
+
+A fourth, from driving it rather than from the script: **`pkill -f "…restore"`
+killed the ssh session issuing it**, because the pattern was in its own command
+line. `vm-restore-test.sh` already warns about exactly this for `pgrep`; use a
+character class (`rest[o]re`) so the pattern cannot match itself.
+
 ## Where this was left
 
 - `apt-rollback.sh` written, tested against real transactions, committed and
@@ -564,5 +630,5 @@ Three things bite when bouncing, none of them Timeshift's fault:
 | Jenni's MacBookAir6,1 | four pending items in `~/jenni-camera-todo.md`; her machine is also the last thing gating the upstream applesmc patch |
 | applesmc upstream patch | drafted and fully tested, `patches/upstream-applesmc-nand-disk.md`, not sent |
 | Wi-Fi lockups | trigger corroborated (connection bursts, ~254 sockets); the power-save experiment is confounded — see `WIFI.md` |
-| Automate kernel-update testing in the VM | **Idea, not started.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh` can already rebuild this system in a VM on iteration8, so it could instead restore the latest snapshot, install the candidate kernel, and report whether DKMS built and whether it boots — before the laptop ever sees it. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
+| Automate kernel-update testing in the VM | **Designed; the foundation is built.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh restore` now rebuilds this system in a VM unattended and freezes it as `golden.qcow2`, so the expensive part is done once and each candidate can start from an instant qcow2 overlay. **The design decided 2026-08-09: the two questions split across the two VM phases the script already has, and neither needs a new network hole.** The live-ISO phase is networked *and carries no identity*, so chroot into the restored root there and `apt-get install` the candidate — DKMS builds against the target's headers, not the running kernel, and `kernel-guard.sh check` run in that chroot is the verdict (it already exits 2 for "newest kernel has no `wl`"). The disk phase then boots it under `restrict=on`, exactly as now, answering only "does it come up" — plus `modprobe wl` succeeding, which is a strictly stronger signal than "it built". Still to build: the overlay-per-candidate loop, and a serial console in the golden image (`console=ttyS0` + autologin) so the booted system can be interrogated instead of screenshotted — a deliberate divergence from the laptop, confined to the VM image. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
 | Xorg crash | **First report captured 2026-08-09**, on the `6.17.0-42` boot-test. Retrace says the `SIGABRT` is Xorg's own `FatalError` path — the real fault was a fatal signal *inside* `modesetting_drv.so` during `InitOutput()`. The next boot (7.0.0-28) failed the same code path cleanly (`no screens found`, `/dev/dri/card0` not yet present), so a DRM-availability race is the working hypothesis, not a conclusion. Full write-up under [`crash-report.sh`](#crash-reportsh); coredump kept at `~/xorg-crash-6.17.0-42-2026-08-09.crash`. `/var/crash` is clear, so **which kernel the next one lands on is the discriminator** |
