@@ -102,8 +102,15 @@ run_long() {   # $1 = short label, rest = command
   local log="preflight-$label.log" rcf=".preflight-$label.rc"
   if [ "$DRY" = 1 ]; then echo "    would run on $REMOTE (detached):  $*"; return 0; fi
 
+  # The redirections have to apply to the BACKGROUNDED GROUP, not just to the
+  # command inside it. Redirect only the inner command and the group still holds
+  # the ssh channel open, so ssh never returns -- and then this function blocks
+  # on the launch instead of polling, and the caller sees no progress at all
+  # while the job runs perfectly well on the far side. That is exactly how it
+  # failed the first time it was used for real: the restore ran to completion
+  # with the screen showing nothing.
   ssh -o BatchMode=yes -n "$REMOTE" \
-    "cd $REMOTE_DIR && rm -f $log $rcf && setsid nohup sh -c '$* > $log 2>&1; echo \$? > $rcf' </dev/null >/dev/null 2>&1 & sleep 3" \
+    "cd $REMOTE_DIR && rm -f $log $rcf && { setsid sh -c '$* > $log 2>&1; echo \$? > $rcf' & } </dev/null >/dev/null 2>&1" \
     || die "could not start $label on $REMOTE"
 
   local waited=0 rc="" last="" line
