@@ -309,6 +309,20 @@ cmd_push() {
   # 17.7G apparent against 20.03G actually occupied. Checking free space against
   # the apparent number is checking against a figure that is always too small.
   local need; need=$(du -s -B1 --one-file-system "$SNAPDIR" 2>/dev/null | cut -f1)
+
+  # The destination needs MORE than the source, and the reason is not obvious.
+  # --fake-super stores every symlink as a placeholder regular file holding the
+  # link target. ext4 keeps short symlinks inline in the inode at zero block
+  # cost; a placeholder costs a full 4K block each. Measured 2026-08-09: 18.3G
+  # here became 20.03G there, and 384,866+ symlinks at 4K accounts for it almost
+  # exactly. Sizing the target against the source alone comes up ~10% short.
+  local links extra
+  links=$(find "$SNAPDIR" -type l 2>/dev/null | wc -l)
+  extra=$((links * 4096))
+  if [ "$links" -gt 0 ]; then
+    need=$((need + extra))
+    echo "  $links symlinks become 4K placeholder files there (+$(gb "$extra"))"
+  fi
   local ravail; ravail=$(rsh "df -B1 --output=avail '$REMOTE_DIR' | tail -1 | tr -d ' '")
   echo "  local tree $(gb "${need:-0}"), remote free $(gb "${ravail:-0}")"
 

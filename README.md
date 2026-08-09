@@ -1066,17 +1066,36 @@ symlinks belong and flattens every mode and owner, while looking like it worked.
 ### Two measurement mistakes worth not repeating
 
 **`du -sb` answers a different question than "will this fit".** The pre-flight
-used it to size the tree and got 17.7G, while the remote ended up occupying
-20.03G. `-b` is *apparent* size — the sum of file sizes — but what the
-destination must find is *allocated blocks*, and with ~740k small files each
-rounding up to 4K the gap is over 10%. A space check against the apparent number
-is a check against a figure that is always too small. It now uses `du -s -B1`.
+used it and got 17.7G apparent, where the same tree occupies 18.3G of *allocated
+blocks*. `-b` sums file sizes; what a destination must find is blocks. It now
+uses `du -s -B1`.
 
-The same confusion nearly produced a phantom bug: 17.7G local against 20.03G
-remote looked like `--fake-super` was costing a 4K block per file for its xattr.
-It isn't — the value is `100644 0,0 0:0`, about 35 bytes, and fits inline in this
-filesystem's 256-byte inodes. The two numbers simply were not measuring the same
-thing.
+**But that was not the whole story, and the rest is more interesting.** The
+remote copy occupies **20.03G** against the source's 18.3G — identical content
+(both report 17.7G apparent), yet 1.7G more on disk. Two wrong guesses first:
+
+- *`--fake-super` xattr overhead?* No. A controlled test — the same 13,141 files
+  copied with and without the flag — differed by **4096 bytes in total**, zero
+  per file. The `user.rsync.%stat` value is ~35 bytes and fits inline in this
+  filesystem's 256-byte inodes.
+- *Expanded sparse files?* No. `lastlog` and friends are zero-length on both
+  sides, and block sizes match at 4096.
+
+**It is the symlinks.** `--fake-super` stores each one as a placeholder regular
+file containing the link target — the same mechanism that makes `/usr/bin/X11` a
+1-byte file over there. ext4 keeps short symlinks *inline in the inode* at zero
+block cost; a placeholder costs a full 4K block. On one identical subtree:
+
+    apparent    109,595,972  both sides
+    files       local 11,755   remote 13,141      +1,386
+    allocated   local 154,988,544   remote 160,649,216      +5,660,672
+
+and `1,386 × 4096 = 5,677,056`. The subtree has exactly 1,386 symlinks. Across
+both snapshots there are 384,866 readable ones — 1.47G at 4K, with root-only
+subtrees excluded, which closes the gap.
+
+**So a destination needs roughly 10% more than the source**, and the pre-flight
+now says so explicitly rather than sizing against the source alone.
 
 **`watch` reads `df`, not `du`.** The obvious implementation polls `du` on the
 remote tree, which is ~1.5M stat calls and took ~40 seconds per sample — longer
