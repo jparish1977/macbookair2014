@@ -91,7 +91,7 @@ EOF
 fi
 
 CALLER_HOME="$(home_of_caller)"
-SSH_KEY="${MBA_OFFSITE_KEY:-$CALLER_HOME/.ssh/id_ed25519_iteration8}"
+SSH_KEY="${MBA_OFFSITE_KEY:-${OFFSITE_KEY:-$CALLER_HOME/.ssh/id_ed25519_iteration8}}"
 
 # push and verify need root to read the snapshot tree, and under sudo $HOME
 # becomes /root -- so ssh looks in /root/.ssh/known_hosts, which has never seen
