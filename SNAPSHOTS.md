@@ -517,6 +517,43 @@ a socket and a dead process), and **a failure message that read like a pass**
 (dumping 90 characters of helper output put `trigger none` in the failure line;
 it now reports `trigger-is-none=yes rule-installed=no`).
 
+### `update-test` — running the update here before the laptop sees it
+
+It runs the **real** upgrade in a chroot from the live phase (network, no
+identity) and then boots the result under `restrict=on` and re-runs `verify`.
+The upgrade lands in `candidate.qcow2`, an overlay, so the baseline never moves
+and the same update can be tested repeatedly from where the laptop actually is.
+**Proven on `6.17.0-42`: 10 packages, both DKMS modules built, one-shot boot into
+it, 15/15 about that kernel.**
+
+Findings worth carrying, most of them the tool lying:
+
+- **The kernel holds are the procedure, not a fault.** `mba-wifi.sh` holds kernel
+  packages to keep a known-good fallback installed, so `update-test` correctly
+  found nothing to do. `--unhold` lifts them in the candidate overlay only. On
+  the laptop, lift only the meta-packages — the specific `linux-image-6.17.0-4x`
+  holds *are* the fallback.
+- **A no-op upgrade produced a green verdict.** An untouched image passes every
+  check. It now reports `CHANGED: no` and refuses to grade.
+- **Phased updates are keyed on machine-id, which a clone inherits** — so the VM
+  declines an update for the same reason the laptop does, making a clone-based
+  rig as blind as the machine it protects. This is the tailnet-identity problem
+  one layer down. Forced in with `APT::Get::Always-Include-Phased-Updates`.
+- **GRUB boots the newest kernel, which is usually not the candidate.** A 6.17
+  update sits below the 7.0 kernel, so the first working run re-graded
+  `7.0.0-28`. It now arms a one-shot via `kernel-guard boot-test` and then
+  **checks armed-against-booted** — assuming the one-shot took is how you get a
+  confident verdict about the wrong kernel.
+- **The apt hook cannot be tested by its output.** `--quiet-ok` means silence on
+  success, so grepping for it reports "never fired" every time. Its *guard* is
+  what matters: wrapped in `[ -x /usr/local/bin/kernel-guard ]`, so a missing
+  binary makes it do nothing for ever, silently, indistinguishable from approval.
+
+Mechanically: `umount` needs `-R` or a leftover submount makes the parent "busy"
+with **no process holding it** (`fuser` shows only `kernel mount`), and the rsync
+daemon must be started immediately before the guest fetches, not before a 90s
+boot — a long window is one something else can close.
+
 ### Three bugs it took a real run to find
 
 None of these would have shown up in a dry run, and two of them fail *silently*:
@@ -711,5 +748,5 @@ character class (`rest[o]re`) so the pattern cannot match itself.
 | Jenni's MacBookAir6,1 | four pending items in `~/jenni-camera-todo.md`; her machine is also the last thing gating the upstream applesmc patch |
 | applesmc upstream patch | drafted and fully tested, `patches/upstream-applesmc-nand-disk.md`, not sent |
 | Wi-Fi lockups | trigger corroborated (connection bursts, ~254 sockets); the power-save experiment is confounded — see `WIFI.md` |
-| Automate kernel-update testing in the VM | **Designed; the foundation is built.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh restore` now rebuilds this system in a VM unattended and freezes it as `golden.qcow2`, so the expensive part is done once and each candidate can start from an instant qcow2 overlay. **The design decided 2026-08-09: the two questions split across the two VM phases the script already has, and neither needs a new network hole.** The live-ISO phase is networked *and carries no identity*, so chroot into the restored root there and `apt-get install` the candidate — DKMS builds against the target's headers, not the running kernel, and `kernel-guard.sh check` run in that chroot is the verdict (it already exits 2 for "newest kernel has no `wl`"). The disk phase then boots it under `restrict=on`, exactly as now, answering only "does it come up" — plus `modprobe wl` succeeding, which is a strictly stronger signal than "it built". **The interrogable image is done** — `testbase` boots and answers over serial, and `modprobe wl` loads clean in a VM with no BCM4360 anywhere. Still to build: the overlay-per-candidate loop itself. Note `golden.qcow2` is a point-in-time — the first one carries 6.17.0-40/-41 and 7.0.0-28, already behind the laptop's -42 — so refresh it when a newer snapshot is pushed. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
+| Automate kernel-update testing in the VM | **Designed; the foundation is built.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh restore` now rebuilds this system in a VM unattended and freezes it as `golden.qcow2`, so the expensive part is done once and each candidate can start from an instant qcow2 overlay. **The design decided 2026-08-09: the two questions split across the two VM phases the script already has, and neither needs a new network hole.** The live-ISO phase is networked *and carries no identity*, so chroot into the restored root there and `apt-get install` the candidate — DKMS builds against the target's headers, not the running kernel, and `kernel-guard.sh check` run in that chroot is the verdict (it already exits 2 for "newest kernel has no `wl`"). The disk phase then boots it under `restrict=on`, exactly as now, answering only "does it come up" — plus `modprobe wl` succeeding, which is a strictly stronger signal than "it built". **Built and proven end to end 2026-08-09.** `testbase` boots and answers over serial; `verify` runs the helpers' own checks (15, with `verify-control` proving they can fail); `update-test --unhold` ran the real upgrade to **6.17.0-42**, built both DKMS modules, booted that kernel via a one-shot and graded 15/15 against it. Note `golden.qcow2` is a point-in-time — the first one carries 6.17.0-40/-41 and 7.0.0-28, already behind the laptop's -42 — so refresh it when a newer snapshot is pushed. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
 | Xorg crash | **First report captured 2026-08-09**, on the `6.17.0-42` boot-test. Retrace says the `SIGABRT` is Xorg's own `FatalError` path — the real fault was a fatal signal *inside* `modesetting_drv.so` during `InitOutput()`. The next boot (7.0.0-28) failed the same code path cleanly (`no screens found`, `/dev/dri/card0` not yet present), so a DRM-availability race is the working hypothesis, not a conclusion. Full write-up under [`crash-report.sh`](#crash-reportsh); coredump kept at `~/xorg-crash-6.17.0-42-2026-08-09.crash`. `/var/crash` is clear, so **which kernel the next one lands on is the discriminator** |

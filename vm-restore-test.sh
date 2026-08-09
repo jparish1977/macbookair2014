@@ -119,6 +119,9 @@ usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autolog
        $0 testbase       golden.qcow2 + a serial console -> testbase.qcow2
        $0 verify [IMG]   boot a test image and check this project's fixes took
        $0 verify-control prove those checks can fail, by breaking three on purpose
+       $0 update-test [PKG...]
+                         run the update the laptop is about to run, HERE first:
+                         upgrade a candidate overlay, then re-check every fix
        $0 sh "COMMAND"   run a command in the guest and print what it says
        $0 bootdisk [IMG] boot a restored image off the disk (network restricted;
                          defaults to target.qcow2)
@@ -260,7 +263,25 @@ log file  = $WORK/rsyncd.log
     path = $WORK
     read only = true
 EOF
-  pgrep -f "^rsync --daemon --config=$WORK" >/dev/null && { ok "daemon already running"; return 0; }
+  # A matching PROCESS is not a serving daemon. cmd_stop kills without waiting,
+  # so a pgrep run immediately afterwards still matches a process that is about
+  # to exit -- this then reports "already running", starts nothing, and the
+  # daemon finishes dying. Intermittent, and it cost a whole update-test run.
+  # Judge it by its REPLY, which is the same rule as "a forwarded port is not
+  # evidence" from the batocera work: a listening socket proves nothing about a
+  # service that answers.
+  if rsync --port="$RSYNC_PORT" rsync://127.0.0.1/ >/dev/null 2>&1; then
+    ok "daemon already running and answering"
+    return 0
+  fi
+  # Clear anything mid-death before binding the port again, or the new daemon
+  # fails with "address already in use" and we are back where we started.
+  pkill -f "^rsync --daemon --config=$WORK" 2>/dev/null
+  local w
+  for w in 1 2 3 4 5; do
+    pgrep -f "^rsync --daemon --config=$WORK" >/dev/null || break
+    sleep 1
+  done
   ( rsync --daemon --config="$WORK/rsyncd.conf" --port="$RSYNC_PORT" --address=127.0.0.1 >/dev/null 2>&1 & )
   sleep 2
   rsync --port="$RSYNC_PORT" rsync://127.0.0.1/ >/dev/null 2>&1 \
@@ -289,6 +310,12 @@ EOF
 cmd_boot() {
   cd "$WORK" || die "run '$0 prepare' first"
   [ -s "$WORK/initrd.new" ] || die "no patched initrd -- run '$0 prepare'"
+  # Which disk the live session works on. Defaults to the blank restore target;
+  # update-test points it at a candidate overlay instead, so the upgrade happens
+  # in the phase that HAS a network and carries none of the laptop's identity.
+  local disk="${1:-target.qcow2}"
+  case "$disk" in /*) ;; *) disk="$WORK/$disk" ;; esac
+  [ -s "$disk" ] || die "no such image: $disk"
 
   local mine; mine=$(our_qemu)
   if [ -n "$mine" ] && kill -0 "$mine" 2>/dev/null; then
@@ -306,7 +333,7 @@ cmd_boot() {
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$WORK/vars.fd" \
     -device ich9-ahci,id=ahci \
-    -drive file="$WORK/target.qcow2",if=none,id=t0,format=qcow2  -device ide-hd,bus=ahci.0,drive=t0 \
+    -drive file="$disk",if=none,id=t0,format=qcow2  -device ide-hd,bus=ahci.0,drive=t0 \
     -drive file="$WORK/carrier.qcow2",if=none,id=c0,format=qcow2 -device ide-hd,bus=ahci.1,drive=c0 \
     -drive file="$ISO",if=none,id=cd0,media=cdrom,readonly=on    -device ide-cd,bus=ahci.2,drive=cd0 \
     -kernel "$WORK/bootextract/casper/vmlinuz" -initrd "$WORK/initrd.new" \
@@ -318,7 +345,7 @@ cmd_boot() {
   local i
   for i in $(seq 1 60); do [ -S "$WORK/serial.sock" ] && break; sleep 1; done
   [ -S "$WORK/serial.sock" ] || die "qemu never created the serial socket -- see $WORK/qemu.log"
-  ok "VM started (pid $(cat "$WORK/qemu.pid" 2>/dev/null)), booting the live session"
+  ok "VM started (pid $(cat "$WORK/qemu.pid" 2>/dev/null)), live session on $(basename "$disk")"
   echo "  give it ~50s, then:  $0 sh 'id'"
 }
 
@@ -1074,6 +1101,11 @@ else
 fi
 
 # ------------------------------------------------------------------ system
+# Say plainly which kernel these answers are ABOUT. Every check above is keyed
+# on the running kernel, so a verdict is meaningless without naming it -- and it
+# is not always the one that was just installed.
+R PASS "booted:kernel" "$K"
+
 n=$(systemctl --failed --no-legend --plain 2>/dev/null | wc -l)
 if [ "$n" = 0 ]; then R PASS "system:units" "no failed units"
 else R FAIL "system:units" "$n failed: $(systemctl --failed --no-legend --plain | awk '{print $1}' | tr '\n' ' ')"; fi
@@ -1136,8 +1168,21 @@ VERIFY
 # guest, they can run the helpers and read their reports.
 cmd_verify() {
   cd "$WORK" || die "run '$0 prepare' first"
-  local img="${1:-testbase.qcow2}"
-  case "$img" in /*) ;; *) img="$WORK/$img" ;; esac
+  local img
+  if [ -z "${1:-}" ]; then
+    [ -s "$WORK/testbase.qcow2" ] || die "no testbase.qcow2 -- run '$0 testbase' first"
+    # Boot a THROWAWAY overlay, never testbase itself. Booting an image writes to
+    # it -- journal, logs, systemd state -- so verifying the base directly leaves
+    # every later overlay standing on a slightly different base each time. The
+    # entire point of a base image is that it does not move.
+    rm -f "$WORK/verify-scratch.qcow2"
+    qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/verify-scratch.qcow2" >/dev/null \
+      || die "could not create the scratch overlay"
+    img="$WORK/verify-scratch.qcow2"
+  else
+    img="$1"
+    case "$img" in /*) ;; *) img="$WORK/$img" ;; esac
+  fi
   [ -s "$img" ] || die "no such image: $img -- run '$0 testbase' first"
 
   cmd_bootdisk "$(basename "$img")" >/dev/null || die "could not boot $img"
@@ -1197,6 +1242,342 @@ cmd_verify() {
   info "Those need one boot on the metal -- see kernel-guard.sh boot-test."
   echo
   [ "$fail" -eq 0 ]
+}
+
+# --------------------------------------------------------------- update-test
+
+# Run the update the laptop is about to run, here first.
+#
+# WHY IT RUNS THE REAL UPGRADE RATHER THAN INSTALLING A KERNEL BY HAND
+#
+# `apt-get install linux-image-X` would prove a kernel can be installed. It
+# would not exercise the apt hook, the DKMS triggers, the initramfs rebuild or
+# update-grub -- which is where an update actually goes wrong, and the whole
+# reason kernel-guard's hook exists. So this runs what the machine would run,
+# and one of the things it reports is whether the guard FIRED.
+#
+# WHY THE UPGRADE HAPPENS IN THE LIVE PHASE
+#
+# The two phases have exactly the properties the two halves need, and swapping
+# them would be dangerous:
+#
+#   live ISO   has a network, carries NO identity  -> safe place to reach the
+#              archive, so the upgrade and the DKMS build happen here, in a
+#              chroot onto the candidate disk
+#   disk boot  has the laptop's identity, no route -> stays restrict=on, and only
+#              has to answer "does it come up, and do the fixes still hold"
+#
+# Giving the disk boot a network so apt could run there is what steals the
+# laptop's tailnet node key. See the header.
+#
+# WHAT IT CANNOT TELL YOU
+#
+# Whether Wi-Fi associates, the camera captures or the backlight lights. It moves
+# the line from "reboot the only machine and find out" to "the only thing left to
+# find out on metal is whether the radio comes up".
+cmd_update_test() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  [ -s "$WORK/testbase.qcow2" ] || die "no testbase.qcow2 -- run '$0 testbase' first"
+  # --unhold lifts apt holds inside the candidate only, to test the update that
+  # the hold is deliberately deferring.
+  local unhold=0 pkgs=""
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --unhold) unhold=1 ;;
+      *) pkgs="$pkgs $a" ;;
+    esac
+  done
+  pkgs="${pkgs# }"
+
+  rm -f "$WORK/candidate.qcow2"
+  qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/candidate.qcow2" >/dev/null \
+    || die "could not create the candidate overlay"
+  ok "candidate.qcow2 created over testbase"
+
+  # The daemon is deliberately NOT started here. It is only needed for the few
+  # seconds when the guest fetches the driver, and starting it before a ~90s boot
+  # leaves a long window in which anything that tidies up stray processes can
+  # take it away again -- which happened twice, intermittently, and each time
+  # cost a full run. Start it immediately before it is used, below.
+  cmd_stop >/dev/null 2>&1
+  cmd_boot candidate.qcow2 || die "could not start the live session"
+
+  cat > "$WORK/guest-update.sh" <<'GUEST'
+#!/bin/sh
+# Runs in the LIVE session, detached, with the candidate disk as /dev/sda.
+# Chroots into it and runs the real upgrade. Written by vm-restore-test.sh.
+set -u
+PKGS="${1:-}"
+UNHOLD="${2:-0}"
+T=/mnt/t
+step() { echo "STEP $*" > /tmp/u.status; echo "=== STEP $*"; }
+fail() { echo "DONE:rc=$1" > /tmp/u.status; echo "=== FAILED rc=$1: $2"; exit "$1"; }
+
+step "1/5 mounting the candidate"
+mkdir -p $T
+mount /dev/sda2 $T            || fail 20 "cannot mount the candidate root"
+mount /dev/sda1 $T/boot/efi   || fail 20 "cannot mount its ESP"
+for m in dev dev/pts proc sys; do mount --bind /$m $T/$m || fail 20 "bind /$m"; done
+
+# apt in a chroot needs working DNS, and the image's resolv.conf is a stub
+# symlink to a systemd-resolved that is not running in here.
+cp -a $T/etc/resolv.conf /tmp/resolv.keep 2>/dev/null
+rm -f $T/etc/resolv.conf
+echo "nameserver 10.0.2.3" > $T/etc/resolv.conf     # qemu's user-mode DNS
+
+# Stop the chroot trying to start or restart services on the host's behalf.
+# Without this a package with a service unit fails the upgrade for reasons that
+# have nothing to do with the update being tested.
+printf '#!/bin/sh\nexit 101\n' > $T/usr/sbin/policy-rc.d
+chmod 755 $T/usr/sbin/policy-rc.d
+
+step "2/5 apt-get update"
+chroot $T apt-get update -qq 2>&1 | sed 's/^/    /'
+
+step "3/5 the upgrade itself"
+BEFORE=$(ls $T/boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-||' | sort | tr '\n' ' ')
+
+# Holds are the FIRST thing to report, because a held kernel is the difference
+# between "this update is safe" and "this update never happened". mba-wifi.sh
+# puts them there deliberately, to keep a known-good fallback kernel installed --
+# so finding them is the machine working, not a fault.
+HELD=$(chroot $T apt-mark showhold 2>/dev/null | tr '\n' ' ')
+echo "HELD: ${HELD:-none}"
+if [ "$UNHOLD" = 1 ] && [ -n "$HELD" ]; then
+  # Only ever in the candidate OVERLAY. This answers the question the hold
+  # exists to defer -- "would it be safe to lift this?" -- without lifting
+  # anything on the laptop.
+  chroot $T apt-mark unhold $HELD >/dev/null 2>&1
+  echo "UNHELD: $HELD"
+fi
+export DEBIAN_FRONTEND=noninteractive
+# Ubuntu PHASES updates: apt holds a package back until the rollout percentage
+# reaches this machine, and that decision is keyed on the MACHINE-ID. This image
+# is a clone of the laptop and inherits its machine-id, so it makes exactly the
+# same phasing decision -- without this override the rig is precisely as blind as
+# the machine it exists to protect, and finds nothing to test right up until the
+# day the update lands for real.
+#
+# The first run proved it: 3 packages upgradable, 0 upgraded, "kept back", and a
+# cheerful green verdict on an image nothing had been done to.
+APTOPT="-o APT::Get::Always-Include-Phased-Updates=true"
+if [ -n "$PKGS" ]; then
+  chroot $T apt-get install -y $APTOPT $PKGS > /tmp/apt.out 2>&1; rc=$?
+else
+  # dist-upgrade rather than upgrade, because a new kernel arrives via a
+  # meta-package that changes dependencies and plain `upgrade` holds it back.
+  chroot $T apt-get dist-upgrade -y $APTOPT > /tmp/apt.out 2>&1; rc=$?
+fi
+tail -25 /tmp/apt.out | sed 's/^/    /'
+[ "$rc" = 0 ] || fail 21 "apt exited $rc"
+
+step "4/5 what changed"
+AFTER=$(ls $T/boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-||' | sort | tr '\n' ' ')
+echo "KERNELS-BEFORE: $BEFORE"
+echo "KERNELS-AFTER:  $AFTER"
+N=$(grep -c '^Setting up' /tmp/apt.out 2>/dev/null || echo 0)
+echo "UPGRADED-COUNT: $N"
+# Did anything actually happen? An upgrade that changed nothing must NOT be
+# allowed to produce a green verdict -- that is a test of an untouched image
+# wearing the words "safe to apply".
+CHANGED=no
+[ "$BEFORE" != "$AFTER" ] && CHANGED=yes
+[ "$N" -gt 0 ] && CHANGED=yes
+echo "CHANGED: $CHANGED"
+KEPT=$(sed -n '/kept back/,+2p' /tmp/apt.out 2>/dev/null | tr '\n' ' ' | tr -s ' ')
+[ -n "$KEPT" ] && echo "KEPT-BACK: $KEPT"
+# The apt hook cannot be tested by looking for its output. It runs
+# `kernel-guard check --quiet-ok`, and --quiet-ok means PRINT NOTHING WHEN
+# EVERYTHING IS FINE -- so on a healthy machine silence is success, and grepping
+# the apt transcript for it reports "never fired" every single time. That check
+# was wrong in the first version of this script.
+#
+# What IS worth testing is the hook's guard. It is wrapped in
+# `if [ -x /usr/local/bin/kernel-guard ]`, so if that binary ever goes missing
+# the hook silently does nothing for ever -- no error, no output, and
+# indistinguishable from a hook that ran and approved. That is the failure this
+# rig exists to catch.
+if chroot $T test -x /usr/local/bin/kernel-guard; then
+  chroot $T /usr/local/bin/kernel-guard check --quiet-ok >/dev/null 2>&1
+  echo "HOOK-TARGET: present, check rc=$?"
+else
+  echo "HOOK-TARGET: MISSING -- the hook is guarded by [ -x ] and will do NOTHING, silently"
+fi
+# Which kernels are NEW, and arm a one-shot boot into the newest of them.
+#
+# Without this the boot half is vacuous whenever the candidate is not the newest
+# kernel installed -- and here that is the NORMAL case, not an edge case: a
+# 6.17-series update always sits below the 7.0 kernel, so grub keeps booting
+# 7.0.0-28 and `verify` cheerfully re-grades a kernel already known to be good.
+#
+# It arms it with the project's own kernel-guard boot-test, which means this
+# exercises that path too -- and boot-test refuses outright if the target has no
+# wl built, so a candidate that would strand the machine cannot even be armed.
+NEW=""
+for k in $AFTER; do
+  case " $BEFORE " in *" $k "*) ;; *) NEW="$NEW $k" ;; esac
+done
+NEW=${NEW# }
+echo "NEW-KERNELS: ${NEW:-none}"
+if [ -n "$NEW" ]; then
+  TARGET=$(echo "$NEW" | tr ' ' '\n' | sort -V | tail -1)
+  if chroot $T /opt/mba-verify/kernel-guard.sh boot-test "$TARGET" > /tmp/bt.out 2>&1; then
+    echo "BOOT-TEST-ARMED: $TARGET"
+  else
+    echo "BOOT-TEST-ARMED: FAILED for $TARGET"
+    sed 's/^/    /' /tmp/bt.out
+  fi
+fi
+echo "DKMS-AFTER:"
+chroot $T dkms status 2>/dev/null | grep -v Deprecated | sed 's/^/    /'
+
+step "5/5 kernel-guard's own verdict, in the chroot"
+# Note its "(running)" marker is meaningless here -- the running kernel is the
+# live ISO's. Its per-kernel DKMS grading is what matters.
+chroot $T /opt/mba-verify/kernel-guard.sh check 2>&1 | sed 's/^/    /'
+echo "GUARD-RC: $?"
+
+# Keep the transcript INSIDE the image. /tmp/u.log dies with the live session,
+# and the first run lost the apt output exactly when it was needed to explain a
+# no-op upgrade. Written here, it travels with the candidate and can be read
+# after booting it.
+cp /tmp/apt.out $T/var/log/mba-update-test.log 2>/dev/null
+
+rm -f $T/usr/sbin/policy-rc.d
+rm -f $T/etc/resolv.conf
+cp -a /tmp/resolv.keep $T/etc/resolv.conf 2>/dev/null
+# Flush BEFORE unmounting, so a stubborn mount cannot cost us the upgrade we
+# just did.
+sync
+umount $T/boot/efi 2>/dev/null
+for m in sys proc dev/pts dev; do umount $T/$m 2>/dev/null; done
+# -R matters. A plain umount leaves any submount in place and the parent then
+# reports "target is busy" with NO process holding it -- fuser shows only
+# "kernel mount", which sends you hunting for a process that does not exist.
+umount -R $T 2>/dev/null || umount -l -R $T 2>/dev/null \
+  || fail 22 "could not unmount the candidate even lazily"
+sync
+echo "DONE:rc=0" > /tmp/u.status
+echo "=== upgrade complete"
+GUEST
+  chmod 755 "$WORK/guest-update.sh"
+
+  say "waiting for the live session"
+  local i up=0
+  for i in $(seq 1 40); do
+    guest "id" 4 | grep -q "uid=" && { up=1; break; }
+    sleep 5
+  done
+  [ "$up" = 1 ] || die "no live session after ~3 min -- see $WORK/qemu.log"
+
+  # Serve now, with the guest already up and waiting, then fetch. One retry,
+  # because the failure mode being guarded against is the daemon going away
+  # rather than the transfer itself failing.
+  local try
+  for try in 1 2; do
+    cmd_serve >/dev/null 2>&1
+    guest "rsync -a rsync://10.0.2.2:$RSYNC_PORT/vmtest/guest-update.sh /tmp/u.sh && echo P''ULLED" 20 \
+      | grep -q "^PULLED" && break
+    [ "$try" = 2 ] && {
+      bad "the guest could not fetch the update driver"
+      info "daemon state: $(pgrep -f "^rsync --daemon --config=$WORK" >/dev/null && echo running || echo "NOT running")"
+      die "see $WORK/rsyncd.log"
+    }
+    warn "fetch failed, restarting the daemon and retrying"
+  done
+
+  say "running the upgrade the laptop would run${pkgs:+ (limited to: $pkgs)}"
+  guest "sudo sh -c 'setsid /tmp/u.sh \"$pkgs\" $unhold >/tmp/u.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 \
+    | grep -q "^LAUNCHED" || die "could not launch the update driver"
+
+  local waited=0 last="" line rc="" timeout="${MBA_VMTEST_UPDATE_TIMEOUT:-5400}"
+  while [ "$waited" -lt "$timeout" ]; do
+    sleep 20; waited=$((waited + 20))
+    line=$(guest "cat /tmp/u.status" 5 | grep -E '^(STEP|DONE:rc=)' | tail -1)
+    case "$line" in
+      DONE:rc=*) rc="${line#DONE:rc=}"; break ;;
+      STEP*)     [ "$line" = "$last" ] || { last="$line"; info "$(printf '%4sm  ' $((waited / 60)))$line"; } ;;
+    esac
+  done
+
+  if [ -z "$rc" ] || [ "$rc" != 0 ]; then
+    bad "the upgrade failed in the guest${rc:+ (rc=$rc)}"
+    guest "tail -30 /tmp/u.log" 12 | sed 's/^/        /'
+    info "the VM is left running:  $0 sh 'cat /tmp/u.log'"
+    return 1
+  fi
+  ok "upgrade completed"
+
+  # The interesting lines, pulled out of the guest's transcript.
+  say "what the upgrade did"
+  local report
+  report=$(guest "grep -E '^(KERNELS-BEFORE|KERNELS-AFTER|UPGRADED-COUNT|CHANGED|KEPT-BACK|HELD|UNHELD|NEW-KERNELS|BOOT-TEST-ARMED|HOOK-TARGET|GUARD-RC):' /tmp/u.log" 12)
+  echo "$report" | grep -E '^(KERNELS|UPGRADED|CHANGED|KEPT-BACK|HELD|UNHELD|NEW-|BOOT-TEST|HOOK|GUARD)' | sed 's/^/    /'
+
+  # An upgrade that changed nothing must never reach the verdict. Verifying an
+  # untouched image passes every check and means nothing at all -- the first run
+  # of this did exactly that and said "safe to apply".
+  if ! echo "$report" | grep -q '^CHANGED: yes'; then
+    echo
+    bad "the upgrade changed NOTHING -- there is nothing here to verify"
+    info "This is not a pass. An untouched image passes every check."
+    info ""
+    if echo "$report" | grep -q '^HELD: [a-z]' && [ "$unhold" = 0 ]; then
+      info "Those packages are HELD (see HELD: above). mba-wifi.sh puts kernel"
+      info "holds there on purpose, to keep a known-good fallback installed, so"
+      info "this is the machine working rather than a fault."
+      info ""
+      info "To answer the question the hold exists to defer -- would it be safe"
+      info "to lift it? -- run:   $0 update-test --unhold"
+      info "That lifts them in the CANDIDATE OVERLAY only. The laptop is untouched."
+      return 3
+    fi
+    info "Usual cause: everything is already up to date in the snapshot this"
+    info "image was built from. If apt reported packages KEPT BACK above, they"
+    info "are phased updates that this clone declined for the same reason the"
+    info "laptop does -- it inherits the laptop's machine-id. update-test forces"
+    info "them in, so seeing them held here means something else is holding them."
+    return 2
+  fi
+
+  local want
+  want=$(echo "$report" | sed -n 's/^BOOT-TEST-ARMED: \([^ ]*\)$/\1/p' | tail -1)
+
+  say "now booting the upgraded system and re-checking every fix"
+  cmd_verify candidate.qcow2
+  local vrc=$?
+
+  # Did it actually land on the kernel we installed? grub boots the NEWEST
+  # kernel, which is often not the candidate -- a 6.17 update sits below a 7.0
+  # kernel and the one-shot is the only thing that puts it in front. If that
+  # one-shot did not take, every check above graded the old kernel and the
+  # verdict is about nothing.
+  local booted
+  booted=$(awk -F'|' '/^RESULT [A-Z]*\|booted:kernel\|/ {print $3}' "$WORK/verify.last" 2>/dev/null | tail -1)
+  echo
+  if [ -n "$want" ] && [ "$want" != "FAILED" ]; then
+    if [ "$booted" = "$want" ]; then
+      ok "booted the candidate kernel $booted -- the checks above are about IT"
+    else
+      bad "armed $want but booted $booted"
+      info "The one-shot did not take, so every check above graded the OLD kernel."
+      info "That is not a verdict on this update. Look at grub-editenv in the image."
+      return 4
+    fi
+  elif [ -n "$booted" ]; then
+    info "no new kernel to boot-test; the checks graded $booted"
+  fi
+
+  if [ "$vrc" -eq 0 ]; then
+    ok "the update is safe to apply on the laptop, as far as a VM can tell"
+  else
+    bad "the update BROKE something -- do not apply it to the laptop yet"
+  fi
+  info "Still unproven, and unprovable here: Wi-Fi association, camera capture,"
+  info "sound, and the backlight. One boot on the metal covers those."
+  info "candidate.qcow2 kept for inspection -- delete it or re-run to replace it."
+  return $vrc
 }
 
 # ------------------------------------------------------------- verify-control
@@ -1341,12 +1722,13 @@ cmd_clean() {
 case "${1:-status}" in
   prepare) cmd_prepare ;;
   serve)   cmd_serve ;;
-  boot)    cmd_boot ;;
+  boot)    cmd_boot "${2:-}" ;;
   restore) cmd_restore "${2:-}" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
   testbase)   cmd_testbase ;;
   verify)     cmd_verify "${2:-}" ;;
   verify-control) cmd_verify_control ;;
+  update-test) shift 2>/dev/null; cmd_update_test "$@" ;;
   bootdisk)   cmd_bootdisk "${2:-}" ;;
   screenshot) cmd_screenshot "${2:-}" ;;
   steps)   cmd_steps ;;

@@ -1260,6 +1260,9 @@ laptop.
     ./vm-restore-test.sh verify [IMG] boot it and check this project's fixes took
     ./vm-restore-test.sh verify-control
                                       prove those checks can fail
+    ./vm-restore-test.sh update-test [--unhold] [PKG...]
+                                      run the update the laptop is about to run,
+                                      here first
     ./vm-restore-test.sh sh "CMD"     run a command in the guest
     ./vm-restore-test.sh bootdisk [IMG]
                                       boot a restored image (network restricted)
@@ -1490,6 +1493,69 @@ family this project keeps finding:
   first 90 characters of the helper's output, which put `trigger none` in the
   failure line. It now reports which assertion failed —
   `trigger-is-none=yes rule-installed=no`.
+
+### `update-test` — run the update here before the laptop sees it
+
+    ./vm-restore-test.sh update-test              # what the machine would run
+    ./vm-restore-test.sh update-test --unhold     # ...if the kernel holds were lifted
+
+It runs **the real upgrade**, not a hand-picked `apt-get install`. Installing a
+kernel by hand proves a kernel can be installed; it does not exercise the apt
+hook, the DKMS triggers, the initramfs rebuild or `update-grub`, which is where
+an update actually goes wrong.
+
+The two VM phases have exactly the properties the two halves need:
+
+| phase | has | does |
+| --- | --- | --- |
+| live ISO | a network, **no identity** | chroot into the candidate, run the upgrade, build DKMS |
+| disk boot | the laptop's identity, **no route** | stays `restrict=on`; boots it and re-runs `verify` |
+
+Giving the disk boot a network so apt could run there is precisely what steals
+the laptop's tailnet node key. The upgrade lands in `candidate.qcow2`, an overlay
+— so the baseline never moves and the same update can be tested repeatedly from
+where the laptop actually is.
+
+**Proven end to end on `6.17.0-42`:** 10 packages upgraded, `broadcom-sta` and
+`facetimehd` both built for the new kernel, one-shot boot into it, and 15/15
+checks *about that kernel*.
+
+#### Five findings, four of which were the tool lying
+
+- **The kernel packages are on hold, and that is the procedure.** `mba-wifi.sh`
+  holds them to keep a known-good fallback installed. So `update-test` found
+  nothing to do — correctly. `--unhold` lifts them **in the candidate overlay
+  only**, answering the question the hold exists to defer: *would it be safe to
+  lift this?* On the laptop you would lift only the meta-packages and leave the
+  specific `linux-image-6.17.0-4x` holds in place, since those are the fallback.
+- **A no-op upgrade produced a green "safe to apply".** An untouched image passes
+  every check. It now reports `CHANGED: no` and exits 2 without a verdict.
+- **Phased updates are keyed on the machine-id, which a clone inherits.** So the
+  VM declines an update for exactly the same reason the laptop does — a
+  pre-flight rig built from a clone is by default *as blind as the machine it
+  protects*. Forced in with `APT::Get::Always-Include-Phased-Updates`. (This is
+  the tailnet-identity problem again, one layer down.)
+- **GRUB boots the newest kernel, which is usually not the candidate.** A
+  6.17-series update sits below the 7.0 kernel, so the first working run booted
+  `7.0.0-28` and cheerfully re-graded a kernel already known good. It now arms a
+  one-shot with the project's own `kernel-guard boot-test` — which *refuses to
+  arm* a kernel with no `wl`, so a stranding candidate cannot even be selected —
+  and then checks armed-against-booted, because assuming the one-shot took is how
+  you get a confident verdict about the wrong kernel.
+- **The apt hook cannot be tested by looking for its output.** It runs
+  `kernel-guard check --quiet-ok`, and `--quiet-ok` means *print nothing when
+  fine* — so on a healthy machine silence is success and grepping for it reports
+  "never fired" every time. What is worth testing is its guard: the hook is
+  wrapped in `if [ -x /usr/local/bin/kernel-guard ]`, so if that binary goes
+  missing the hook does nothing **for ever, silently, indistinguishable from
+  having run and approved**.
+
+Two mechanical ones worth keeping: `umount` without `-R` leaves a submount and
+the parent reports `target is busy` with **no process holding it** — `fuser`
+shows only `kernel mount`, sending you after a process that does not exist. And
+the rsync daemon is now started *immediately before the guest fetches from it*
+rather than before a 90-second boot, because a long window is one in which
+anything that tidies stray processes takes it away, intermittently.
 
 **zram needs no help at all.** `/dev/zram0` comes back with the restore at
 priority 100, ahead of the disk swapfile at -1, because it is configured on the
