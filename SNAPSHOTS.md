@@ -469,7 +469,18 @@ failures and are not:
 | --- | --- | --- |
 | `lsmod \| grep wl` | **0** | nothing autoloads `wl` with no BCM4360 present. A test must modprobe explicitly or it fails forever |
 | `modprobe wl` | loads, pulls `cfg80211` | the module links against *this* kernel — stronger than "DKMS exited 0", short of "Wi-Fi works" |
-| `systemctl --failed` | **1**, `swapfile.swap` | Timeshift excludes `/swapfile`, so a restored system has none. Any other failed unit is real signal |
+| `systemctl --failed` | **0** | `testbase` supplies the swapfile Timeshift excludes, so anything failed at all is real signal |
+| `swapon --show` | `/swapfile` -1, `/dev/zram0` 100 | both return, priorities intact |
+
+`testbase` creates the 3960M `/swapfile` because Timeshift excludes it, so a
+restored system has the fstab entry and not the file and `swapfile.swap` fails
+forever. A **zero** baseline cannot rot the way "exactly one, and it must be that
+one" does. `golden.qcow2` still fails it deliberately — that failure is honest
+evidence the snapshots are system-only. `fallocate` sufficed, so the overlay
+stayed 4.0M; a qcow2 grows only on real writes. **zram needed nothing**: it comes
+back with the restore at priority 100 ahead of the disk swapfile, being
+system-side config with no hardware to be missing — so the guest inherits the
+laptop's real two-tier swap rather than an approximation.
 
 ### Three bugs it took a real run to find
 

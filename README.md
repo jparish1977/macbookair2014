@@ -1391,8 +1391,33 @@ failures and are not:
 | --- | --- | --- |
 | `lsmod \| grep wl` | **0** | nothing autoloads `wl` — there's no BCM4360 to match. A test must modprobe explicitly, or it reports a false failure forever |
 | `modprobe wl` | loads, pulls in `cfg80211` | the strong signal: the module links against *this* kernel. Stronger than "DKMS exited 0", short of "Wi-Fi works" |
-| `systemctl --failed` | exactly **1** — `swapfile.swap` | Timeshift excludes `/swapfile`, so a restored system never has one. Any *other* failed unit is real signal |
-| `systemctl is-system-running` | `degraded` | follows from the above, and is the normal state here |
+| `systemctl --failed` | **0** | `testbase` supplies the swapfile Timeshift excludes, so anything failed at all is real signal |
+| `systemctl is-system-running` | `running` | not `degraded` — see below |
+| `swapon --show` | `/swapfile` at **-1**, `/dev/zram0` at **100** | both come back, priorities intact |
+
+**Why `testbase` creates a swapfile.** The laptop's `/swapfile` is 3960M and its
+fstab references it, but Timeshift *excludes* the file — so a restored system
+carries the entry and not the file, and `swapfile.swap` fails on every boot
+forever. Supplying one makes the baseline **zero failed units**, and that is
+worth more than tidiness: "nothing failed" is a verdict that cannot rot, where
+"exactly one failed, and it must be that one" quietly stops being true the first
+time anything else legitimately changes and nobody notices.
+
+`golden.qcow2` deliberately still fails that unit. The failure is honest evidence
+that these snapshots are system-only, and the place to paper over it is the test
+image, not the record of what the restore produced.
+
+`fallocate` turned out to be enough — `swapon` accepted it and the overlay stayed
+**4.0M**, because a qcow2 grows only on real writes. The `dd` fallback stays in
+for an image that refuses unwritten extents.
+
+**zram needs no help at all.** `/dev/zram0` comes back with the restore at
+priority 100, ahead of the disk swapfile at -1, because it is configured on the
+system side and is pure software — there is no hardware for a VM to be missing.
+So the guest inherits the laptop's real two-tier arrangement rather than an
+approximation of it, which matters the moment anything is *built* in here: zram
+is a compression window, not extra capacity, and the disk swapfile is the
+backstop for when it stops helping.
 
 ### The clone fights the original for its identity
 

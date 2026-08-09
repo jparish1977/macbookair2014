@@ -892,6 +892,34 @@ GRUB_DISABLE_OS_PROBER=true
 GRUB_CMDLINE_LINUX_DEFAULT="acpi_osi=!Darwin"
 X
 
+  # Swap. The laptop has a 3960M /swapfile and its fstab references it, but
+  # Timeshift EXCLUDES the file -- so a restored system carries the entry and not
+  # the file, and swapfile.swap fails on every boot forever.
+  #
+  # Creating it here makes the healthy baseline ZERO failed units. That is worth
+  # more than tidiness: "nothing failed" is a verdict that cannot rot, whereas
+  # "exactly one failed and it must be that one" quietly stops being true the
+  # first time anything else legitimately changes, and nobody notices.
+  #
+  # It also gives a 4G guest the same memory profile as the machine it stands in
+  # for, which stops being cosmetic the moment something is BUILT in here rather
+  # than merely booted.
+  #
+  # golden.qcow2 deliberately still fails this unit. That failure is honest
+  # evidence that these snapshots are system-only, and the place to hide it is
+  # the test image, not the record of what the restore produced.
+  #
+  # fallocate first, dd as the fallback, and the boot check is what settles it:
+  # ext4 fallocate can leave UNWRITTEN extents and swapon has historically
+  # refused those. If swapfile.swap comes back failed, that is why.
+  local swap_mb="${MBA_VMTEST_SWAP_MB:-3960}"
+  sudo fallocate -l "${swap_mb}M" "$mnt/swapfile" 2>/dev/null \
+    || sudo dd if=/dev/zero of="$mnt/swapfile" bs=1M count="$swap_mb" status=none \
+    || die "could not create the swapfile"
+  sudo chmod 600 "$mnt/swapfile"
+  sudo mkswap "$mnt/swapfile" >/dev/null 2>&1 || die "mkswap failed on the new swapfile"
+  ok "swapfile ${swap_mb}M created, matching the laptop"
+
   # Autologin, for the same reason the live ISO needs it: this bypasses PAM's
   # password path rather than trying to satisfy it.
   sudo mkdir -p "$mnt/etc/systemd/system/serial-getty@ttyS0.service.d"
@@ -931,9 +959,9 @@ X
   info "Boot it and ask it something:"
   info "  $0 bootdisk testbase.qcow2 && sleep 95 && $0 sh 'uname -r; modprobe wl && echo WL_OK'"
   echo
-  info "Baseline on a healthy image: exactly one failed unit, swapfile.swap --"
-  info "Timeshift excludes /swapfile, so a restored system never has one. Any"
-  info "OTHER failed unit is real signal."
+  info "Baseline on a healthy image: ZERO failed units. golden.qcow2 fails"
+  info "swapfile.swap (Timeshift excludes /swapfile); testbase supplies one, so"
+  info "here anything failed at all is real signal."
   echo
 }
 
