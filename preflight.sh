@@ -123,6 +123,14 @@ run_long() {   # $1 = short label, rest = command
            "grep -E '^  (==|ok|--) ' $REMOTE_DIR/$log 2>/dev/null | tail -1" 2>/dev/null)
     [ -n "$line" ] && [ "$line" != "$last" ] && { last="$line"; info "$(printf '%4sm' $((waited / 60)))  ${line#  }"; }
   done
+  # A job that finishes before the first poll printed NOTHING, because the loop
+  # only reports lines as they change. The restore skipping in 24ms did exactly
+  # that: it completed correctly and the screen showed a heading and silence.
+  if [ -z "$last" ]; then
+    ssh -o BatchMode=yes -n "$REMOTE" \
+      "grep -E '^  (==|ok|--|WARN) ' $REMOTE_DIR/$log 2>/dev/null | tail -4" 2>/dev/null \
+      | sed 's/^  /    /'
+  fi
   [ -n "$rc" ] || { bad "$label did not finish within $((timeout / 60)) minutes"; return 1; }
   return "$rc"
 }
@@ -288,7 +296,7 @@ fi
 
 if [ "$SKIP_PUSH" = 1 ]; then
   say "Skipping the snapshot and push (--skip-push)"
-  warn "the VM will be rebuilt from whatever is already offsite, which may be old"
+  warn "using the offsite copy as it stands -- check it is the snapshot you meant"
 else
   say "Snapshotting this machine (sudo -- this is the one prompt)"
   info "This is both the input to the test AND your rollback point."
@@ -349,45 +357,90 @@ NEWK=$(grep -o 'BOOT-TEST-ARMED: [^ ]*' "$UPLOG" 2>/dev/null | tail -1 | awk '{p
 echo
 case "$verdict" in
   0)
-    say "VERDICT: the update looks safe"
-    echo
-    info "In the VM it installed, both DKMS modules built for the new kernel,"
-    info "that kernel booted, and every fix this project installs still held."
-    echo
-    info "What is still unproven, and cannot be proven without the hardware:"
-    info "  Wi-Fi associating, the camera capturing, sound coming out of the"
-    info "  speakers, and the keyboard backlight physically lighting."
-    echo
-    echo "  Next, at the keyboard:"
-    echo
-    echo "    # 1. Let the new kernel in, but KEEP the versioned images held."
-    echo "    #    Those specific holds are what you fall back TO if this goes"
-    echo "    #    wrong -- unhold only the meta-packages that are pending."
-    echo "    sudo apt-mark unhold ${pending_pkgs:-<pending meta-packages>}"
-    echo "    sudo apt-get install --only-upgrade ${pending_pkgs:-<pending meta-packages>}"
-    echo
-    echo "    # 2. Confirm every kernel still has its drivers BEFORE rebooting."
-    echo "    ./kernel-guard.sh check"
-    echo
-    echo "    # 3. Boot the new kernel ONCE. If it fails, the next boot returns"
-    echo "    #    to the current default on its own."
-    echo "    sudo ./kernel-guard.sh boot-test $NEWK"
-    echo "    sudo reboot"
-    echo
-    echo "    # 4. After it comes up -- the four things the VM could not test:"
-    echo "    uname -r                       # expect $NEWK"
-    echo "    ./mba-wifi.sh status           # Wi-Fi actually associated"
-    echo "    ./mba-webcam.sh status         # camera"
-    echo "    ./kbd-backlight.sh status      # backlight trigger"
-    echo
-    echo "    # 5. Once it is up and those four all look right, make THIS the"
-    echo "    #    new rollback point -- otherwise it stays the pre-update state"
-    echo "    #    and golden.qcow2 drifts behind the real machine:"
-    echo "    ./preflight.sh --confirm-good"
-    echo
-    echo "    # If it goes wrong: reboot to the previous kernel from the GRUB"
-    echo "    # menu, or roll the whole system back to the snapshot taken above:"
-    echo "    ./system-snapshot.sh list"
+    # Was a KERNEL actually installed, or did packages just move?
+    #
+    # These need different advice and the difference is not cosmetic. A
+    # bookkeeping upgrade cannot affect Wi-Fi, the camera, the backlight or
+    # sound, because those only break when the kernel changes -- so telling
+    # someone to boot-test and re-check four pieces of hardware is telling them
+    # to do nothing, slowly. Worse, the boilerplate used to assert "both DKMS
+    # modules built for the new kernel, that kernel booted" when there was no
+    # new kernel and the boot had graded the one already running.
+    # Trim trailing space only. `tr -d " "` would glue a two-kernel list into
+    # one nonsense token.
+    newk_list=$(echo "$report" | sed -n 's/^NEW-KERNELS: *//p' | tail -1 | sed 's/[[:space:]]*$//')
+    unheld=$(echo "$report" | sed -n 's/^UNHELD: //p' | tail -1)
+    metas="${pending_pkgs:-<the pending meta-packages>}"
+
+    if [ -z "$newk_list" ] || [ "$newk_list" = "none" ]; then
+      say "VERDICT: safe, and it does not touch the kernel"
+      echo
+      info "Packages upgraded, but no kernel was added or removed. Installed"
+      info "before and after:"
+      info "  $(echo "$report" | sed -n 's/^KERNELS-AFTER: *//p' | tail -1)"
+      echo
+      info "That is the important part: the four things a VM cannot test --"
+      info "Wi-Fi associating, the camera, sound, the backlight -- are only at"
+      info "risk from a KERNEL change. There is not one here, so there is"
+      info "nothing for a boot on the metal to prove."
+      echo
+      echo "  Apply it, and put the holds straight back:"
+      echo
+      echo "    sudo apt-mark unhold $metas"
+      echo "    sudo apt-get install --only-upgrade $metas"
+      echo "    sudo apt-mark hold $metas"
+      echo
+      info "The third line is not optional. Leaving them unheld removes the"
+      info "protection that stops a new kernel arriving unannounced, which has"
+      info "been the procedure on this machine."
+      info ""
+      info "No reboot. The running kernel is untouched, so --confirm-good has"
+      info "nothing new to confirm either."
+      echo
+    else
+      say "VERDICT: the update looks safe, and it brings a new kernel"
+      echo
+      info "In the VM, $newk_list installed, broadcom-sta and facetimehd both"
+      info "built for it, it booted, and every fix this project installs held."
+      echo
+      info "What is still unproven, and cannot be proven without the hardware:"
+      info "  Wi-Fi associating, the camera capturing, sound coming out of the"
+      info "  speakers, and the keyboard backlight physically lighting."
+      echo
+      echo "  Next, at the keyboard:"
+      echo
+      echo "    # 1. Let the new kernel in, then put the protection straight"
+      echo "    #    back. The versioned holds stay -- those are what you fall"
+      echo "    #    back TO if this goes wrong."
+      echo "    sudo apt-mark unhold $metas"
+      echo "    sudo apt-get install --only-upgrade $metas"
+      echo "    sudo apt-mark hold $metas"
+      echo
+      echo "    # 2. Confirm every kernel still has its drivers BEFORE rebooting."
+      echo "    ./kernel-guard.sh check"
+      echo
+      echo "    # 3. Boot the new kernel ONCE. If it fails, the next boot returns"
+      echo "    #    to the current default on its own."
+      echo "    sudo ./kernel-guard.sh boot-test $newk_list"
+      echo "    sudo reboot"
+      echo
+      echo "    # 4. After it comes up -- the four things the VM could not test:"
+      echo "    uname -r                       # expect $newk_list"
+      echo "    ./mba-wifi.sh status           # Wi-Fi actually associated"
+      echo "    ./mba-webcam.sh status         # camera"
+      echo "    ./kbd-backlight.sh status      # backlight trigger"
+      echo
+      echo "    # 5. Once it is up and those four all look right, make THIS the"
+      echo "    #    new rollback point -- otherwise it stays the pre-update state"
+      echo "    #    and golden.qcow2 drifts behind the real machine:"
+      echo "    ./preflight.sh --confirm-good"
+      echo
+      echo "    # If it goes wrong: reboot to the previous kernel from the GRUB"
+      echo "    # menu, or roll the whole system back to the snapshot taken above:"
+      echo "    ./system-snapshot.sh list"
+      echo
+    fi
+    [ -n "$unheld" ] && info "(The VM lifted these holds in its own overlay only: $(echo "$unheld" | cut -c1-60)...)"
     echo
     ;;
   2)
