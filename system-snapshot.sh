@@ -51,6 +51,7 @@ die()  { echo "error: $*" >&2; exit 1; }
 warn() { echo "  WARN  $*"; }
 ok()   { echo "  ok    $*"; }
 bad()  { echo "  FAIL  $*"; }
+info() { echo "  --    $*"; }   # NB: without this, `info` runs /usr/bin/info
 
 need_root() {
   [ "$(id -u)" = 0 ] || die "$1 needs root. Try: sudo $0 $*"
@@ -64,7 +65,7 @@ usage: $0 status              what is configured now, and whether it is sane
        $0 list                snapshots present (instant)
        $0 list --sizes        ... with hardlink-aware sizes (slow: walks every file)
        $0 prune [N]           keep the newest N, delete the rest (root, default $KEEP_DEFAULT)
-       $0 delete NAME         delete one snapshot by name (root)
+       $0 delete NAME|REASON  delete one snapshot, by name or its exact reason (root)
        $0 check-esp [SNAP]    what a restore would do to the EFI partition (root)
        $0 restore-help        how to actually restore, and the local gotchas
 
@@ -729,8 +730,47 @@ cmd_delete() {
   need_root delete
   local name="${1:-}"
   [ -n "$name" ] || die "which snapshot? Try: $0 list"
-  [ -d "$SNAPDIR/$name" ] || die "no such snapshot: $name
-       $0 list  shows what exists"
+
+  # People identify a snapshot by the reason they typed at `create`, not by its
+  # timestamp -- that is the whole point of having comments. Refusing a comment
+  # with "no such snapshot" is technically true and useless, so match on it, and
+  # when that fails show what actually exists instead of pointing at `list`.
+  if [ ! -d "$SNAPDIR/$name" ]; then
+    local exact sub matches count s
+    exact=""; sub=""
+    while read -r s; do
+      [ -z "$s" ] && continue
+      c=$(snap_comment "$s")
+      [ "$c" = "$name" ] && exact="$exact$s"$'\n'
+      case "$c" in *"$name"*) sub="$sub$s"$'\n' ;; esac
+    done <<< "$(snap_names)"
+
+    # Prefer a WHOLE-comment match over a substring one. Comments are not unique
+    # and one can contain another ("test" inside "test again"), so substring
+    # alone would call an unambiguous request ambiguous -- or worse, resolve to
+    # something the user did not mean.
+    matches=$(printf '%s' "$exact"); [ -z "$matches" ] && matches=$(printf '%s' "$sub")
+    count=$(printf '%s' "$matches" | grep -c . || true)
+
+    if [ "${count:-0}" = 1 ]; then
+      name=$(printf '%s' "$matches" | head -1)
+      info "matched by comment -> $name"
+    elif [ "${count:-0}" -gt 1 ]; then
+      # Never pick one. Comments are free text and duplicates are legal.
+      bad "\"$name\" matches $count snapshots:"
+      while read -r s; do
+        [ -n "$s" ] && printf '          %-22s %s\n' "$s" "$(snap_comment "$s")"
+      done <<< "$matches"
+      die "ambiguous -- delete by name, which is always unique"
+    else
+      bad "no snapshot called \"$name\", and no comment contains it."
+      echo "        What exists:"
+      while read -r s; do
+        [ -n "$s" ] && printf '          %-22s %s\n' "$s" "$(snap_comment "$s")"
+      done <<< "$(snap_names)"
+      exit 1
+    fi
+  fi
 
   local total; total=$(snap_names | grep -c .)
   echo
