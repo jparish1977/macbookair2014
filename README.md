@@ -726,6 +726,7 @@ snapshot, for when something broke and you do not know what changed.
     ./system-snapshot.sh list                what exists (instant)
     ./system-snapshot.sh list --sizes        ... with real sizes (slow — see below)
     sudo ./system-snapshot.sh prune [N]      keep the newest N (default 3)
+    sudo ./system-snapshot.sh delete NAME    delete one snapshot by name
     sudo ./system-snapshot.sh check-esp      what a restore would do to the ESP
     ./system-snapshot.sh restore-help        the procedure, and the local traps
 
@@ -851,6 +852,22 @@ and sizing moved behind `list --sizes`, which prints a time estimate before it
 starts rather than going silent:
 
     1m56.7s  ->  0.079s
+
+**"Keep the newest N" assumes newest means most valuable, and that stopped being
+true the moment the restore tests ran.** After the one-way test and the bounce
+test there were four snapshots: the three newest were disposable test artifacts
+with markers and a `hello` package inside them, and the only pristine one was the
+*oldest*. `prune 1` would have deleted the single snapshot worth keeping and kept
+three full of test residue — and the docs here had been recommending `prune` as
+the cleanup step.
+
+So `prune` now **refuses to delete a snapshot that carries a comment**, on the
+grounds that a comment means a human labelled it on purpose and age cannot see
+that. It prints the labelled ones, the exact `delete` command for each, and
+`--force` if you really did mean by-count. Unlabelled snapshots still prune
+normally. The missing piece it points at is `delete NAME`, which removes one
+snapshot without disturbing the others — the thing prune's model structurally
+cannot express, since the snapshot you want rid of is often not the oldest.
 
 ## `restore-test.sh`
 

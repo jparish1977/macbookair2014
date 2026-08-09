@@ -64,6 +64,7 @@ usage: $0 status              what is configured now, and whether it is sane
        $0 list                snapshots present (instant)
        $0 list --sizes        ... with hardlink-aware sizes (slow: walks every file)
        $0 prune [N]           keep the newest N, delete the rest (root, default $KEEP_DEFAULT)
+       $0 delete NAME         delete one snapshot by name (root)
        $0 check-esp [SNAP]    what a restore would do to the EFI partition (root)
        $0 restore-help        how to actually restore, and the local gotchas
 
@@ -606,7 +607,15 @@ cmd_list_sizes() {
 
 cmd_prune() {
   need_root prune
-  local keep="${1:-$KEEP_DEFAULT}"
+  local keep="" force=no a
+  for a in "$@"; do
+    case "$a" in
+      --force|-f) force=yes ;;
+      '')         ;;
+      *)          [ -z "$keep" ] && keep="$a" || die "prune takes one number, got '$keep' and '$a'" ;;
+    esac
+  done
+  keep="${keep:-$KEEP_DEFAULT}"
   case "$keep" in ''|*[!0-9]*) die "prune takes a number, got '$keep'" ;; esac
 
   # 'prune 0' parses fine and means "delete every snapshot" -- a rollback tool
@@ -625,6 +634,43 @@ cmd_prune() {
     return 0
   fi
   doomed=$(echo "$names" | head -n "$((total - keep))")
+
+  # "Keep the newest N" quietly assumes newest == most valuable. That stops being
+  # true the moment you take a deliberate baseline and then experiment on top of
+  # it -- which is exactly what happened here on 2026-08-08: after a restore test
+  # and a bounce test, the three newest snapshots were all disposable test
+  # artifacts and the only pristine one was the OLDEST. `prune 1` would have
+  # deleted the single snapshot worth keeping and kept three with test markers in
+  # them.
+  #
+  # So: a snapshot carrying a comment was labelled by a human on purpose. Refuse
+  # to delete one by count alone. Unlabelled snapshots still prune normally.
+  local labelled="" s c
+  while read -r s; do
+    [ -z "$s" ] && continue
+    c=$(snap_comment "$s")
+    [ -n "$c" ] && labelled="$labelled$s"$'\t'"$c"$'\n'
+  done <<< "$doomed"
+
+  if [ -n "$labelled" ] && [ "$force" != yes ]; then
+    echo
+    echo "  REFUSING: prune goes by age, and these are older than what it would keep"
+    echo "  -- but somebody labelled them, which age cannot see:"
+    echo
+    printf '%s' "$labelled" | while IFS=$'\t' read -r s c; do
+      [ -n "$s" ] && printf '    %-22s %s\n' "$s" "$c"
+    done
+    echo
+    echo "  If the label is stale, delete them by name and say so deliberately:"
+    printf '%s' "$labelled" | while IFS=$'\t' read -r s c; do
+      [ -n "$s" ] && echo "    sudo $0 delete $s"
+    done
+    echo
+    echo "  Or, if you really do mean 'keep the newest $keep whatever they are':"
+    echo "    sudo $0 prune $keep --force"
+    echo
+    return 1
+  fi
 
   # Show the reasons, and show what SURVIVES as well as what goes. A column of bare
   # timestamps gives you nothing to judge by at a prompt that deletes things -- and
@@ -668,6 +714,49 @@ cmd_prune() {
   sleep 2   # same orphaned-stderr race as create; keep the listing readable
 
   local free_after
+  free_after=$(df -B1 --output=avail "$(dirname "$SNAPDIR")" | tail -1 | tr -d ' ')
+  echo
+  echo "  freed $(gb "$((free_after - free_before))") -- $(gb "$free_before") before, $(gb "$free_after") after"
+  cmd_list
+}
+
+# Deleting one snapshot by name, which `prune` deliberately cannot do.
+#
+# prune's model is "keep the newest N". When the snapshot you want rid of is not
+# the oldest -- a test artifact sitting on top of a baseline you care about --
+# that model cannot express it, and forcing it to will take the baseline with it.
+cmd_delete() {
+  need_root delete
+  local name="${1:-}"
+  [ -n "$name" ] || die "which snapshot? Try: $0 list"
+  [ -d "$SNAPDIR/$name" ] || die "no such snapshot: $name
+       $0 list  shows what exists"
+
+  local total; total=$(snap_names | grep -c .)
+  echo
+  printf '  DELETING  %-22s %s\n' "$name" "$(snap_comment "$name")"
+  echo
+
+  if [ "$total" -le 1 ]; then
+    warn "this is the ONLY snapshot. Deleting it leaves nothing to roll back to,"
+    echo "        and the next one will be a full ~18G rather than an increment."
+    echo
+  fi
+
+  # Same expectation-management as prune: hardlinked data is freed only when the
+  # last snapshot referencing it goes, so this often returns far less than the
+  # size attributed to it.
+  local free_before free_after ans
+  free_before=$(df -B1 --output=avail "$(dirname "$SNAPDIR")" | tail -1 | tr -d ' ')
+  echo "  $(gb "$free_before") free now. Expect little back unless this snapshot is"
+  echo "  the last one referencing its data."
+  echo
+  read -r -p "  Proceed? [y/N] " ans || true
+  case "${ans:-}" in [yY]*) ;; *) echo "  aborted. Nothing deleted."; return 0 ;; esac
+
+  timeshift --delete --snapshot "$name" --yes || die "timeshift could not delete $name"
+  sleep 2   # same orphaned-stderr race as create; keep the listing readable
+
   free_after=$(df -B1 --output=avail "$(dirname "$SNAPDIR")" | tail -1 | tr -d ' ')
   echo
   echo "  freed $(gb "$((free_after - free_before))") -- $(gb "$free_before") before, $(gb "$free_after") after"
@@ -837,7 +926,8 @@ case "${1:-status}" in
   configure|config)          cmd_configure ;;
   create)                    cmd_create "${2:-}" ;;
   list|ls)                   cmd_list "${2:-}" ;;
-  prune)                     cmd_prune "${2:-}" ;;
+  prune)                     cmd_prune "${2:-}" "${3:-}" ;;
+  delete|rm)                 cmd_delete "${2:-}" ;;
   check-esp|esp)             cmd_check_esp "${2:-}" ;;
   restore-help|restore)      cmd_restore_help ;;
   *)                         usage ;;

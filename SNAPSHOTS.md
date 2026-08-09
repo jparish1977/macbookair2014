@@ -142,6 +142,15 @@ Step 1 and 2 below are done; step 3 is still optional and still not done.
    The value is in "last known good", not history. Note that on-demand (`O`)
    snapshots are never auto-pruned by Timeshift, so this is a manual step by
    design.
+
+   **But prune by count is the wrong tool once you have a deliberate baseline.**
+   After the restore and bounce tests there were four snapshots: the three newest
+   were disposable test artifacts and the only pristine one was the *oldest*, so
+   `prune 1` would have deleted the one worth keeping. `prune` now refuses to
+   delete any snapshot carrying a comment — a comment means somebody labelled it
+   on purpose, which age cannot see — and points at `delete NAME`, which removes
+   one snapshot without disturbing the rest. `--force` restores the old
+   behaviour, and unlabelled snapshots still prune normally.
 3. **Optionally, rsync the snapshot tree to iteration8** over the tailnet as an
    offsite copy. Local for rollback, remote for disk death. Do not invert this.
 
