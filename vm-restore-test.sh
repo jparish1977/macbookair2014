@@ -398,13 +398,27 @@ cmd_steps() {
   The guest reaches this host at 10.0.2.2 under user-mode networking, and the
   rsync daemon from '$0 serve' decodes --fake-super on the way out.
 
+  Everything below has been run end to end and ends at a login screen. The
+  awkward parts are steps 4 and 5, and neither is guessable.
+
   1. Partition the target the way the real machine is: GPT, EFI system
      partition, ext4 root.
 
        sudo sgdisk -Z /dev/sda
        sudo sgdisk -n1:0:+512M -t1:ef00 -c1:EFI -n2:0:0 -t2:8300 -c2:root /dev/sda
-       sudo mkfs.vfat -F32 /dev/sda1
-       sudo mkfs.ext4 -F /dev/sda2
+
+     Now the UUIDs. Timeshift maps mount points from the SNAPSHOT'S OWN fstab,
+     matched by UUID -- not from --target. On a disk whose UUIDs do not match it
+     aborts with "Data will be modified on: <empty>" and NO error message at all.
+     Either format with the original UUIDs (get them from
+     'snapshot-offsite.sh disk-plan'):
+
+       sudo mkfs.vfat -F32 -i <VOLID>  /dev/sda1     # e.g. 1AE41280, no dash
+       sudo mkfs.ext4 -qF -U <UUID>    /dev/sda2
+
+     ...or format plainly and answer the mapping prompts in step 5 with explicit
+     device names. Matching also fixes crypttab and resume references and lets
+     the restore run unattended; answering works on any replacement disk.
 
   2. Format the carrier and pull the snapshot tree onto it. This is the step
      that has to preserve ownership -- and the daemon, not the client, is what
@@ -421,15 +435,63 @@ cmd_steps() {
        ls -l /mnt/carrier/$snap/localhost/usr/bin/sudo
        ls -l /mnt/carrier/$snap/localhost/etc/shadow
 
-  4. Restore onto the target with timeshift, pointed at the carrier.
+  4. Make timeshift able to SEE the snapshots. Two things bite here.
 
-       sudo apt-get install -y timeshift
-       sudo mkdir -p /mnt/root && sudo mount /dev/sda2 /mnt/root
-       (see restore-help in snapshot-offsite.sh -- --skip-grub does NOT apply
-        here, this time you DO want a bootloader installed)
+     First, the offsite copy holds the CONTENTS of /timeshift/snapshots, so on
+     the carrier they land at the root and timeshift reports "No snapshots on
+     this device". It looks in <device>/timeshift/snapshots/ :
 
-  5. Boot it. Stop the VM, restart it without -kernel/-cdrom so the firmware
-     boots the disk, and see whether the machine comes back.
+       sudo mkdir -p /mnt/carrier/timeshift/snapshots
+       sudo mv /mnt/carrier/2026-* /mnt/carrier/timeshift/snapshots/
+
+     Second, on a live session timeshift has no config, enters "First run mode"
+     and prompts for a backup device -- a prompt --snapshot-device does NOT
+     answer and --yes cannot either. Seed a config instead. Note the UUID needs
+     sudo: plain blkid returns nothing and you get an empty config that reports
+     "Device : Not Selected".
+
+       sudo apt-get install -y timeshift expect
+       U=\$(sudo blkid -o value -s UUID /dev/sdb)
+       printf '{"backup_device_uuid":"%s","btrfs_mode":"false","do_first_run":"false"}\\n' "\$U" \\
+         | sudo tee /etc/timeshift/timeshift.json >/dev/null
+       sudo timeshift --list          # must show your snapshots with comments
+
+  5. Restore -- and drive the prompts with expect, not 'yes'.
+
+     The sequence is "Press ENTER to continue", then "Re-install GRUB2 (y/n)",
+     then "Continue with restore? (y/n)". So 'yes' answers the first wrongly and
+     'yes ""' answers the last two wrongly; each failed here. (debconf-set-
+     selections is for apt prompts -- timeshift rolls its own stdin loop.)
+     If you did NOT match UUIDs, answer "Select '<mount>' device" with the
+     device name rather than accepting the empty default.
+
+       cat > /root/restore.exp <<'X'
+       set timeout 5400
+       spawn timeshift --restore --snapshot <SNAP> --target /dev/sda2 --grub-device /dev/sda
+       expect {
+           -re "Press ENTER to continue"        { send "\\r";  exp_continue }
+           -re "Re-install GRUB2 bootloader.*:" { send "y\\r"; exp_continue }
+           -re "Continue with restore.*:"       { send "y\\r"; exp_continue }
+           -re "Enter device name or number.*:" { send "\\r";  exp_continue }
+           eof
+       }
+       X
+       sudo expect -f /root/restore.exp
+
+     Check the plan it prints says "Data will be modified on: /dev/sda2 / and
+     /dev/sda1 /boot/efi". An EMPTY table means the mapping failed -- go back to
+     the UUIDs in step 1. Note --skip-grub does NOT apply here: unlike a
+     same-machine rollback, this time you DO want a bootloader installed.
+
+  6. Boot it -- and keep it OFF the network.
+
+       $0 bootdisk        # uses -netdev user,restrict=on, deliberately
+       $0 screenshot      # the restored system has no serial console
+
+     The restored system is a second copy of this machine's IDENTITY: tailscale
+     node key, machine-id, ssh host keys. Give it real network access while the
+     original is running and it will claim the original's tailnet identity and
+     knock it offline -- see the warning at the top of this script.
 
 EOF
 }
