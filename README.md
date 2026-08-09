@@ -962,6 +962,7 @@ The other half of the snapshot story: `/timeshift` lives on the same `sda` as
 the tree to another machine.
 
     ./snapshot-offsite.sh status           what exists both ends, and whether a push can work
+    ./snapshot-offsite.sh list [--sizes]   what is on the far end: names, counts, reasons
     sudo ./snapshot-offsite.sh push        copy the tree (--dry-run, --mirror)
     sudo ./snapshot-offsite.sh verify      compare both ends, transferring nothing
     ./snapshot-offsite.sh watch [SECONDS]  readable progress for a push running elsewhere
@@ -973,6 +974,14 @@ the tree to another machine.
     20.03G       occupied remotely
     38.69G       apparent size -- so -H saved 18.66G, very nearly half
     verify       all three checks passed
+
+`list` reads each remote snapshot's `info.json` for its file count and the reason
+you typed — no root needed, because `--fake-super` leaves the copy owned by the
+remote account. `--sizes` adds a single hardlink-aware `du` across every snapshot
+at once: **4–5s there against ~2 minutes for the same thing locally.** As with the
+local tool those figures are *relative attribution*, not standalone sizes — the
+oldest snapshot absorbs all the shared data and looks enormous, and deleting it
+frees far less than its number implies.
 
 `verify` is the part worth running: it re-compares the whole tree with the same
 flags `push` used, and confirms `/etc/shadow` in the remote copy really does carry

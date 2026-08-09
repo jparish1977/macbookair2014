@@ -135,6 +135,7 @@ usage() {
 usage: $0 status                what exists both ends, and whether a push can work
        $0 push [--dry-run]      copy the snapshot tree to $REMOTE_HOST (root)
        $0 push --mirror         ... and delete remote snapshots no longer held here
+       $0 list [--sizes]        what is on the far end: names, counts, reasons
        $0 verify                compare both ends without transferring anything (root)
        $0 watch [SECONDS]       readable progress for a push running elsewhere
        $0 pull-test [DIR]       prove the copy restores: pull probes back (root)
@@ -604,6 +605,97 @@ cmd_pull_test() {
   return "$FAILED"
 }
 
+# ---------------------------------------------------------------------- list
+
+# What is actually on the far end -- names, counts, reasons, optionally sizes.
+#
+# `status` answers "can a push work"; this answers "what have I got over there".
+# Both matter, and conflating them made status too long.
+#
+# --fake-super is what makes this cheap: the copy is owned by the remote account,
+# so each snapshot's info.json is readable WITHOUT root, and the file counts and
+# comments come straight out of it. No sudo, no walking the tree.
+#
+# Sizes are a single du across every snapshot AT ONCE, deliberately. Run per
+# snapshot they would each report the full tree, because every snapshot is a
+# complete hardlinked tree -- the numbers only mean anything relative to each
+# other, with shared data attributed to whichever is listed first. Same trap as
+# the local tool, same fix. Measured 4s on iteration8 against ~2 minutes for the
+# equivalent on the laptop, so it is offered rather than hidden -- but it is
+# still a walk of 1.5M entries and the first, cold run is slower.
+cmd_list() {
+  local sizes=no
+  case "${1:-}" in
+    --sizes|-s) sizes=yes ;;
+    '') ;;
+    *) die "unknown option: $1" ;;
+  esac
+
+  if ! rsh true 2>/dev/null; then
+    bad "cannot reach $REMOTE_USER@$REMOTE_HOST"; why_unreachable; exit 1
+  fi
+
+  [ "$sizes" = yes ] && echo "  measuring (one du across all snapshots; ~5s warm, longer cold)..."
+
+  rsh "DIR='$REMOTE_DIR'; SIZES='$sizes'; "'
+    cd "$DIR" 2>/dev/null || { echo "NODIR"; exit 0; }
+    snaps=$(ls -1 2>/dev/null | sort)
+    [ -z "$snaps" ] && { echo "EMPTY"; exit 0; }
+    if [ "$SIZES" = yes ]; then
+      # One invocation, oldest first: shared inodes counted once, against the
+      # first snapshot that references them.
+      du -s -B1 --one-file-system $snaps 2>/dev/null > /tmp/.off_sizes.$$
+    fi
+    python3 - "$DIR" "$SIZES" "/tmp/.off_sizes.$$" <<PY
+import json, os, sys
+d, sizes, sf = sys.argv[1], sys.argv[2] == "yes", sys.argv[3]
+sz = {}
+if sizes and os.path.exists(sf):
+    for line in open(sf):
+        p = line.split(None, 1)
+        if len(p) == 2: sz[p[1].strip()] = int(p[0])
+rows, total = [], 0
+for s in sorted(os.listdir(d)):
+    if not os.path.isdir(os.path.join(d, s)): continue
+    fc, tag, com = "?", "", ""
+    try:
+        with open(os.path.join(d, s, "info.json")) as f:
+            j = json.load(f); fc = j.get("file_count","?"); tag = j.get("tags",""); com = j.get("comments","")
+    except Exception: pass
+    b = sz.get(s); total += b or 0
+    rows.append((s, fc, ("%.1fG" % (b/1073741824)) if b is not None else "", tag, com))
+w = "  %-22s %9s" + ("  %8s" if sizes else "%s") + "  %s"
+print(w % ("NAME", "FILES", "SIZE" if sizes else "", "REASON"))
+for s, fc, b, tag, com in rows:
+    print(w % (s, fc, b if sizes else "", com))
+if sizes: print("TOTAL %d" % total)
+PY
+    rm -f /tmp/.off_sizes.$$
+    df -B1 --output=avail "$DIR" | tail -1 | tr -d " " | sed "s/^/FREE /"
+  ' 2>/dev/null | while IFS= read -r line; do
+      case "$line" in
+        NODIR)   bad "$REMOTE_DIR does not exist on $REMOTE_HOST -- nothing pushed yet"; continue ;;
+        EMPTY)   info "no snapshots on $REMOTE_HOST yet. Run: sudo $0 push"; continue ;;
+        TOTAL*)  echo; echo "  occupied there: $(gb "${line#TOTAL }")"; continue ;;
+        FREE*)   [ "$sizes" = no ] && echo
+                 echo "  free there:     $(gb "${line#FREE }")"; continue ;;
+      esac
+      echo "$line"
+    done
+
+  if [ "$sizes" = yes ]; then
+    cat <<'EOF'
+
+  Sizes are RELATIVE ATTRIBUTION, not standalone. Every snapshot is a complete
+  hardlinked tree; shared data is counted once, against the oldest that
+  references it. So the first row looks enormous and the rest look tiny, and
+  deleting the first frees far less than its number suggests -- the data simply
+  becomes attributed to the next one along.
+EOF
+  fi
+  echo
+}
+
 # ----------------------------------------------------------------- disk-plan
 
 # Print the commands that rebuild the original disk layout, UUIDs and all.
@@ -763,6 +855,7 @@ EOF
 case "${1:-status}" in
   status)              cmd_status ;;
   push)                shift; cmd_push "$@" ;;
+  list|ls)             cmd_list "${2:-}" ;;
   verify)              cmd_verify ;;
   watch)               cmd_watch "${2:-60}" ;;
   pull-test)           cmd_pull_test "${2:-}" ;;
