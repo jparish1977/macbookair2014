@@ -869,7 +869,15 @@ that. It prints the labelled ones, the exact `delete` command for each, and
 `--force` if you really did mean by-count. Unlabelled snapshots still prune
 normally. The missing piece it points at is `delete NAME`, which removes one
 snapshot without disturbing the others — the thing prune's model structurally
-cannot express, since the snapshot you want rid of is often not the oldest.
+cannot express, since the snapshot you want rid of is often not the oldest. It
+also accepts the **reason** you typed at `create`, because that is how a person
+identifies a snapshot; comments are free text and not unique, so an ambiguous
+one lists the candidates and refuses rather than picking.
+
+Both commands warn that hardlinked data is only freed when the *last* snapshot
+referencing it goes, and that was then measured: deleting a throwaway snapshot
+holding **741,921 files freed 0.5G**, because everything in it but the delta was
+still referenced by the two being kept.
 
 ## `restore-test.sh`
 
