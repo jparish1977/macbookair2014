@@ -200,7 +200,7 @@ cmd_confirm_good() {
   else
     say "Pushing it offsite, so the next pre-flight tests from HERE"
     info "This is what stops golden.qcow2 drifting behind the real machine."
-    local_run "$HERE/snapshot-offsite.sh" push || die "the push failed (the snapshot is still local and valid)"
+    local_run sudo "$HERE/snapshot-offsite.sh" push || die "the push failed (the snapshot is still local and valid)"
     ok "offsite copy up to date"
   fi
 
@@ -212,6 +212,25 @@ cmd_confirm_good() {
 }
 
 # ---------------------------------------------------------------- pre-flight
+
+# Refuse to run as root, rather than half-working and blaming the network.
+#
+# Under sudo, ssh reads /root/.ssh/known_hosts -- which has never seen
+# iteration8 -- and BatchMode cannot prompt, so it fails with "cannot reach" and
+# sends you at the network when the network is fine. This repo has already lost
+# time to exactly that once (see snapshot-offsite.sh). rsync would go as
+# root@iteration8, and anything created here would come out root-owned.
+#
+# The one step that genuinely needs root calls sudo itself, and so does the push
+# -- which reads SUDO_USER to find YOUR ssh key rather than root's. That only
+# works when this script is started as you.
+if [ "$(id -u)" = 0 ]; then
+  bad "do not run this with sudo"
+  info "Under sudo, ssh uses root's known_hosts and keys, and this fails as a"
+  info "network error that is not a network error. The steps that need root ask"
+  info "for it themselves -- and the push needs SUDO_USER set to find your key."
+  die "run it as yourself:  ./preflight.sh"
+fi
 
 say "Checks before anything is changed"
 
@@ -273,7 +292,10 @@ else
 
   say "Pushing it to $REMOTE (this is the long part)"
   info "Incremental -- only what changed since the last push crosses Wi-Fi."
-  local_run "$HERE/snapshot-offsite.sh" push \
+  # sudo, because push has to read the snapshot tree and that is root-owned.
+  # snapshot-offsite.sh expects this -- it reads SUDO_USER to find the invoking
+  # user's ssh key rather than root's.
+  local_run sudo "$HERE/snapshot-offsite.sh" push \
     || die "the push failed. The snapshot is still here and still valid."
   ok "offsite copy up to date"
 fi
