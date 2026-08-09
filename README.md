@@ -1256,8 +1256,10 @@ laptop.
     ./vm-restore-test.sh serve        rsync daemon that decodes --fake-super
     ./vm-restore-test.sh boot         launch the VM headless, serial on a socket
     ./vm-restore-test.sh restore      the whole restore unattended -> golden.qcow2
+    ./vm-restore-test.sh testbase     golden.qcow2 + a serial console -> testbase.qcow2
     ./vm-restore-test.sh sh "CMD"     run a command in the guest
-    ./vm-restore-test.sh bootdisk     boot the RESTORED system (network restricted)
+    ./vm-restore-test.sh bootdisk [IMG]
+                                      boot a restored image (network restricted)
     ./vm-restore-test.sh screenshot   capture its framebuffer -- it has no serial console
     ./vm-restore-test.sh steps        the same restore by hand, and why each step is like that
     ./vm-restore-test.sh status       what exists, what is running
@@ -1338,6 +1340,59 @@ And one from driving it rather than from the script: **`pkill -f "…restore"`
 killed the ssh session that issued it**, the pattern being in its own command
 line. This script's header already warns about that for `pgrep`; use a character
 class — `rest[o]re` — so a pattern cannot match itself.
+
+### `testbase` — an image you can ask questions
+
+A restored system booted from disk is **silent on the serial port**: its
+`grub.cfg` came from a laptop that boots to a screen. `screenshot` is fine for a
+human and useless as a verdict — a kernel test has to ask `uname -r`,
+`modprobe wl` and `systemctl --failed` and read the answers back.
+
+    ./vm-restore-test.sh testbase
+    ./vm-restore-test.sh bootdisk testbase.qcow2
+
+`golden.qcow2` is left alone, because its one job is to be exactly what the
+snapshot restores to — edit it and it stops being evidence. `testbase.qcow2` is a
+qcow2 **overlay** on it, and the whole divergence costs **2.7M over a 19G base**:
+
+    golden.qcow2       faithful restore, untouched
+      └─ testbase.qcow2     + serial console, + autologin  (2.7M)
+           └─ candidate overlays, made and thrown away per test
+
+That is not a theoretical tidiness argument. The first attempt wrote the settings
+to the wrong file, and the fix was `rm testbase.qcow2` and start again — with
+`golden` never at risk.
+
+Everything that differs from the laptop is in **one file**,
+`/etc/default/grub.d/99-vmtest.cfg`. It boots verbose (`quiet splash` dropped)
+because a failed boot that prints nothing is the one outcome the rig exists to
+diagnose.
+
+#### Two more traps, both silent
+
+- **`/etc/default/grub` is not the last word on Mint.** `grub-mkconfig` sources
+  `/etc/default/grub.d/*.cfg` afterwards, and Mint ships `50_linuxmint.cfg`
+  setting `GRUB_DISABLE_OS_PROBER=false`. The setting was written into the main
+  file — correctly, twice — and os-prober ran regardless. Anything that must win
+  goes in a `99-` fragment.
+- **`update-grub` in a chroot probes the *build host's* disks.** With `/dev`
+  bind-mounted, os-prober found `Ubuntu 24.04.4 LTS on /dev/sdc4` — iteration8's
+  own root — and wrote boot entries for it into the image. `testbase` now
+  verifies this rather than trusting it, and does so without naming any
+  host-specific device: every UUID `grub.cfg` searches for must belong to the
+  image, and anything else is a leak.
+
+#### What a healthy image looks like
+
+Worth knowing before it's used as a verdict, because two of these read as
+failures and are not:
+
+| check | healthy answer | why |
+| --- | --- | --- |
+| `lsmod \| grep wl` | **0** | nothing autoloads `wl` — there's no BCM4360 to match. A test must modprobe explicitly, or it reports a false failure forever |
+| `modprobe wl` | loads, pulls in `cfg80211` | the strong signal: the module links against *this* kernel. Stronger than "DKMS exited 0", short of "Wi-Fi works" |
+| `systemctl --failed` | exactly **1** — `swapfile.swap` | Timeshift excludes `/swapfile`, so a restored system never has one. Any *other* failed unit is real signal |
+| `systemctl is-system-running` | `degraded` | follows from the above, and is the normal state here |
 
 ### The clone fights the original for its identity
 

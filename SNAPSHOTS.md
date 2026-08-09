@@ -436,6 +436,41 @@ emergency shell and read as a restore bug.
 anything downstream boots from; deleting it there would make `clean` mean two
 different things depending on what had been run.
 
+### `testbase` — an image that can be asked questions
+
+A restored system booted from disk is **silent on the serial port**: its
+`grub.cfg` came from a laptop that boots to a screen. `screenshot` is fine for a
+human and useless as a verdict. `testbase` puts a serial console and autologin
+into a qcow2 **overlay** on `golden.qcow2`, leaving golden faithful — its one job
+is to be exactly what the snapshot restores to, and editing it destroys that.
+
+    golden.qcow2       faithful restore, untouched
+      └─ testbase.qcow2     + console, + autologin   (2.7M over a 19G base)
+           └─ candidate overlays, per kernel test
+
+Every divergence is one file, `/etc/default/grub.d/99-vmtest.cfg`, and it boots
+verbose — `quiet splash` dropped, because a failed boot that prints nothing is
+the outcome the rig exists to diagnose. Two traps, both silent:
+
+- **`/etc/default/grub` is not the last word on Mint.** `grub-mkconfig` sources
+  `/etc/default/grub.d/*.cfg` afterwards and Mint's `50_linuxmint.cfg` sets
+  `GRUB_DISABLE_OS_PROBER=false`. It was set in the main file, correctly, twice,
+  and os-prober ran anyway. Anything that must win goes in a `99-` fragment.
+- **`update-grub` in a chroot probes the build host's disks.** With `/dev`
+  bind-mounted it found `Ubuntu 24.04.4 LTS on /dev/sdc4` — iteration8's own root
+  — and wrote boot entries for it into the image. `testbase` now checks this
+  without naming any host-specific device: every UUID `grub.cfg` searches for
+  must belong to the image.
+
+**What a healthy image answers**, which matters because two of these read as
+failures and are not:
+
+| check | healthy | why |
+| --- | --- | --- |
+| `lsmod \| grep wl` | **0** | nothing autoloads `wl` with no BCM4360 present. A test must modprobe explicitly or it fails forever |
+| `modprobe wl` | loads, pulls `cfg80211` | the module links against *this* kernel — stronger than "DKMS exited 0", short of "Wi-Fi works" |
+| `systemctl --failed` | **1**, `swapfile.swap` | Timeshift excludes `/swapfile`, so a restored system has none. Any other failed unit is real signal |
+
 ### Three bugs it took a real run to find
 
 None of these would have shown up in a dry run, and two of them fail *silently*:
@@ -630,5 +665,5 @@ character class (`rest[o]re`) so the pattern cannot match itself.
 | Jenni's MacBookAir6,1 | four pending items in `~/jenni-camera-todo.md`; her machine is also the last thing gating the upstream applesmc patch |
 | applesmc upstream patch | drafted and fully tested, `patches/upstream-applesmc-nand-disk.md`, not sent |
 | Wi-Fi lockups | trigger corroborated (connection bursts, ~254 sockets); the power-save experiment is confounded — see `WIFI.md` |
-| Automate kernel-update testing in the VM | **Designed; the foundation is built.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh restore` now rebuilds this system in a VM unattended and freezes it as `golden.qcow2`, so the expensive part is done once and each candidate can start from an instant qcow2 overlay. **The design decided 2026-08-09: the two questions split across the two VM phases the script already has, and neither needs a new network hole.** The live-ISO phase is networked *and carries no identity*, so chroot into the restored root there and `apt-get install` the candidate — DKMS builds against the target's headers, not the running kernel, and `kernel-guard.sh check` run in that chroot is the verdict (it already exits 2 for "newest kernel has no `wl`"). The disk phase then boots it under `restrict=on`, exactly as now, answering only "does it come up" — plus `modprobe wl` succeeding, which is a strictly stronger signal than "it built". Still to build: the overlay-per-candidate loop, and a serial console in the golden image (`console=ttyS0` + autologin) so the booted system can be interrogated instead of screenshotted — a deliberate divergence from the laptop, confined to the VM image. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
+| Automate kernel-update testing in the VM | **Designed; the foundation is built.** A kernel update currently gets proven by installing it on the laptop and boot-testing (`kernel-guard boot-test`) — a real reboot on the only machine. `vm-restore-test.sh restore` now rebuilds this system in a VM unattended and freezes it as `golden.qcow2`, so the expensive part is done once and each candidate can start from an instant qcow2 overlay. **The design decided 2026-08-09: the two questions split across the two VM phases the script already has, and neither needs a new network hole.** The live-ISO phase is networked *and carries no identity*, so chroot into the restored root there and `apt-get install` the candidate — DKMS builds against the target's headers, not the running kernel, and `kernel-guard.sh check` run in that chroot is the verdict (it already exits 2 for "newest kernel has no `wl`"). The disk phase then boots it under `restrict=on`, exactly as now, answering only "does it come up" — plus `modprobe wl` succeeding, which is a strictly stronger signal than "it built". **The interrogable image is done** — `testbase` boots and answers over serial, and `modprobe wl` loads clean in a VM with no BCM4360 anywhere. Still to build: the overlay-per-candidate loop itself. Note `golden.qcow2` is a point-in-time — the first one carries 6.17.0-40/-41 and 7.0.0-28, already behind the laptop's -42 — so refresh it when a newer snapshot is pushed. **The limitation that must not get lost: a VM has no BCM4360, no FaceTime camera and no Apple SMC**, so it can prove the `wl` build succeeds and the system boots, but *cannot* prove Wi-Fi works. That is a real split rather than a flaw — a failed DKMS build is the common stranding cause and is exactly what a VM catches, while the hardware path still needs one boot on the metal. Note iteration8 already hosts the kernel workshop (`/srv/kernel-workshop`), so build-and-test could live on one machine |
 | Xorg crash | **First report captured 2026-08-09**, on the `6.17.0-42` boot-test. Retrace says the `SIGABRT` is Xorg's own `FatalError` path — the real fault was a fatal signal *inside* `modesetting_drv.so` during `InitOutput()`. The next boot (7.0.0-28) failed the same code path cleanly (`no screens found`, `/dev/dri/card0` not yet present), so a DRM-availability race is the working hypothesis, not a conclusion. Full write-up under [`crash-report.sh`](#crash-reportsh); coredump kept at `~/xorg-crash-6.17.0-42-2026-08-09.crash`. `/var/crash` is clear, so **which kernel the next one lands on is the discriminator** |

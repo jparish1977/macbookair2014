@@ -116,8 +116,10 @@ usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autolog
        $0 boot           launch the VM headless, serial on a unix socket
        $0 restore [SNAP] do the whole restore unattended, ending in golden.qcow2
                          (defaults to the newest snapshot)
+       $0 testbase       golden.qcow2 + a serial console -> testbase.qcow2
        $0 sh "COMMAND"   run a command in the guest and print what it says
-       $0 bootdisk       boot the RESTORED system off the disk (network restricted)
+       $0 bootdisk [IMG] boot a restored image off the disk (network restricted;
+                         defaults to target.qcow2)
        $0 screenshot     capture the guest's framebuffer (it has no serial console)
        $0 steps          the same restore by hand, and why each step is like that
        $0 status         what exists and what is running
@@ -332,7 +334,12 @@ cmd_boot() {
 # failure. Use `screenshot` to see the console.
 cmd_bootdisk() {
   cd "$WORK" || die "run '$0 prepare' first"
-  [ -s "$WORK/target.qcow2" ] || die "no target disk -- has a restore been done?"
+  # Which image to boot. Defaults to the disk a restore just wrote, but naming
+  # one lets you boot testbase.qcow2 or a candidate overlay without copying 19G
+  # over target.qcow2 first.
+  local img="${1:-target.qcow2}"
+  case "$img" in /*) ;; *) img="$WORK/$img" ;; esac
+  [ -s "$img" ] || die "no such image: $img"
 
   local mine; mine=$(our_qemu)
   [ -n "$mine" ] && kill -0 "$mine" 2>/dev/null && { kill "$mine"; sleep 3; }
@@ -358,7 +365,7 @@ PY
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$WORK/vars.fd" \
     -device ich9-ahci,id=ahci \
-    -drive file="$WORK/target.qcow2",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
+    -drive file="$img",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
     -netdev user,id=n0,restrict=on -device e1000,netdev=n0 \
     -serial "unix:$WORK/serial.sock,server,nowait" -display none \
     -monitor "unix:$WORK/mon.sock,server,nowait" -pidfile "$WORK/qemu.pid" \
@@ -367,7 +374,7 @@ PY
   local i
   for i in $(seq 1 40); do [ -S "$WORK/mon.sock" ] && break; sleep 1; done
   [ -S "$WORK/mon.sock" ] || die "qemu did not start -- see $WORK/qemu-disk.log"
-  ok "booting the RESTORED system from disk, pid $(cat "$WORK/qemu.pid" 2>/dev/null)"
+  ok "booting $(basename "$img") from disk, pid $(cat "$WORK/qemu.pid" 2>/dev/null)"
   info "network is restricted: the clone cannot reach your tailnet"
   echo "  give it ~90s, then:  $0 screenshot"
 }
@@ -807,6 +814,129 @@ GUEST
   echo
 }
 
+# ------------------------------------------------------------------- testbase
+
+# golden.qcow2 + a console it can be asked questions over.
+#
+# WHY THIS IS A SEPARATE IMAGE AND NOT AN EDIT TO GOLDEN
+#
+# golden.qcow2 has one job: be exactly what the snapshot restores to. The moment
+# it is edited it stops being evidence about the restore. testbase.qcow2 is a
+# qcow2 OVERLAY on it -- seconds to make, costs nothing, and every divergence
+# from the laptop is confined to a chain you can throw away and rebuild. That is
+# not theoretical: the first attempt at this wrote to the wrong file and the fix
+# was to delete the overlay and start again, with golden untouched throughout.
+#
+# WHY A CONSOLE AT ALL
+#
+# A restored system booted from disk is silent on the serial port, because the
+# grub.cfg came from a laptop that boots to a screen. `screenshot` is fine for a
+# human and useless as a verdict: a kernel test has to be able to ask `uname -r`,
+# `modprobe wl` and `systemctl --failed` and read the answers.
+#
+# WHERE THE SETTINGS GO, AND WHY IT IS NOT /etc/default/grub
+#
+# grub-mkconfig sources /etc/default/grub and THEN /etc/default/grub.d/*.cfg, and
+# Mint ships 50_linuxmint.cfg setting GRUB_DISABLE_OS_PROBER=false. So a setting
+# written to the main file is silently overridden -- it was set there twice,
+# correctly, and os-prober ran anyway. Everything goes in one 99- fragment that
+# sorts last, which also makes the whole divergence a single file you can read.
+cmd_testbase() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  [ -s "$WORK/golden.qcow2" ] || die "no golden.qcow2 -- run '$0 restore' first"
+  command -v qemu-nbd >/dev/null || die "qemu-nbd missing (apt install qemu-utils)"
+  sudo -n true 2>/dev/null || die "this needs root for nbd, mount and chroot, and sudo is asking for a password"
+
+  local dev="${MBA_VMTEST_NBD:-/dev/nbd0}"
+  local mnt="$WORK/tb-mnt"
+  mkdir -p "$mnt"
+
+  tb_cleanup() {
+    sudo umount "$mnt/boot/efi" 2>/dev/null
+    local m
+    for m in sys proc dev/pts dev; do sudo umount "$mnt/$m" 2>/dev/null; done
+    sudo umount "$mnt" 2>/dev/null
+    sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1
+  }
+  trap 'tb_cleanup' EXIT
+
+  sudo modprobe nbd max_part=8 || die "cannot load the nbd module"
+  # Never inherit a connection we did not make -- a stale one points at another
+  # image, and everything below would edit the wrong disk.
+  sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1
+  sleep 1
+
+  rm -f "$WORK/testbase.qcow2"
+  qemu-img create -f qcow2 -b "$WORK/golden.qcow2" -F qcow2 "$WORK/testbase.qcow2" >/dev/null \
+    || die "could not create the overlay"
+  sudo qemu-nbd --connect="$dev" "$WORK/testbase.qcow2" || die "qemu-nbd could not attach the overlay"
+  sleep 2
+  [ -b "${dev}p2" ] || die "no partitions on $dev -- is golden.qcow2 really a restored disk?"
+  sudo mount "${dev}p2" "$mnt" || die "cannot mount the restored root"
+
+  sudo tee "$mnt/etc/default/grub.d/99-vmtest.cfg" >/dev/null <<'X'
+# The only way this image differs from the machine it was restored from.
+# Written by vm-restore-test.sh testbase.
+#
+# It lives here rather than in /etc/default/grub because grub-mkconfig sources
+# this directory afterwards, and Mint's 50_linuxmint.cfg sets
+# GRUB_DISABLE_OS_PROBER=false -- so the main file loses every time.
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200"
+GRUB_TERMINAL="console serial"
+GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200"
+# Without this, update-grub run in a chroot with the HOST's /dev bind-mounted
+# probes the host's own disks and writes boot entries for them into this image.
+GRUB_DISABLE_OS_PROBER=true
+# quiet/splash dropped deliberately: a failed boot that prints nothing is the one
+# outcome this rig exists to diagnose.
+GRUB_CMDLINE_LINUX_DEFAULT="acpi_osi=!Darwin"
+X
+
+  # Autologin, for the same reason the live ISO needs it: this bypasses PAM's
+  # password path rather than trying to satisfy it.
+  sudo mkdir -p "$mnt/etc/systemd/system/serial-getty@ttyS0.service.d"
+  sudo tee "$mnt/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf" >/dev/null <<'X'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I 115200 vt220
+X
+
+  local m
+  for m in dev dev/pts proc sys; do sudo mount --bind "/$m" "$mnt/$m" || die "bind mount /$m failed"; done
+  sudo mount "${dev}p1" "$mnt/boot/efi" || die "cannot mount the ESP"
+  sudo chroot "$mnt" update-grub 2>&1 | sed 's/^/    /'
+
+  # Verify rather than assume, and do it without naming this host's disks: every
+  # UUID grub searches for must belong to THIS image. Anything else is an
+  # os-prober entry for the machine that built the image.
+  local rootuuid espuuid foreign consoles
+  rootuuid=$(sudo blkid -o value -s UUID "${dev}p2")
+  espuuid=$(sudo blkid -o value -s UUID "${dev}p1")
+  foreign=$(sudo grep -o 'fs-uuid --set=root [^ ]*' "$mnt/boot/grub/grub.cfg" 2>/dev/null \
+            | awk '{print $3}' | sort -u | grep -v -e "^$rootuuid\$" -e "^$espuuid\$" || true)
+  consoles=$(sudo grep -c 'console=ttyS0' "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
+
+  if [ -n "$foreign" ]; then
+    bad "grub.cfg searches for UUIDs that are not in this image:"
+    echo "$foreign" | sed 's/^/        /'
+    die "os-prober leaked the build host's disks into the image"
+  fi
+  [ "$consoles" -gt 0 ] || die "no console=ttyS0 in grub.cfg -- the fragment did not take"
+  ok "grub.cfg: $consoles serial console entries, no foreign disks"
+
+  tb_cleanup
+  trap - EXIT
+  ok "testbase.qcow2 ready ($(du -h "$WORK/testbase.qcow2" | cut -f1) over golden.qcow2)"
+  echo
+  info "Boot it and ask it something:"
+  info "  $0 bootdisk testbase.qcow2 && sleep 95 && $0 sh 'uname -r; modprobe wl && echo WL_OK'"
+  echo
+  info "Baseline on a healthy image: exactly one failed unit, swapfile.swap --"
+  info "Timeshift excludes /swapfile, so a restored system never has one. Any"
+  info "OTHER failed unit is real signal."
+  echo
+}
+
 # ------------------------------------------------------------ status / teardown
 
 cmd_status() {
@@ -816,7 +946,7 @@ cmd_status() {
   echo
   [ -d "$WORK" ] || { info "not prepared yet"; echo; return 0; }
   local f
-  for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2 golden.qcow2; do
+  for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2 golden.qcow2 testbase.qcow2; do
     [ -e "$WORK/$f" ] && printf '  %-28s %s\n' "$f" "$(du -h "$WORK/$f" | cut -f1)" \
                       || printf '  %-28s %s\n' "$f" "missing"
   done
@@ -865,7 +995,8 @@ case "${1:-status}" in
   boot)    cmd_boot ;;
   restore) cmd_restore "${2:-}" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
-  bootdisk)   cmd_bootdisk ;;
+  testbase)   cmd_testbase ;;
+  bootdisk)   cmd_bootdisk "${2:-}" ;;
   screenshot) cmd_screenshot "${2:-}" ;;
   steps)   cmd_steps ;;
   status)  cmd_status ;;
