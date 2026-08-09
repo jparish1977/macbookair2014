@@ -29,6 +29,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 | [`system-snapshot.sh`](#system-snapshotsh) | A local known-good snapshot for when you *don't* know what changed |
 | [`restore-test.sh`](#restore-testsh) | Prove the restore works *before* you need it, with a control condition |
 | [`snapshot-offsite.sh`](#snapshot-offsitesh) | Copy the snapshot tree to another machine — for a dead disk, not a bad update |
+| [`vm-restore-test.sh`](#vm-restore-testsh) | Rehearse the whole disaster recovery in a VM, headless and scriptable |
 
 **Working out what is actually wrong**
 
@@ -1085,6 +1086,58 @@ already established rather than disabling host-key checking, which is the other
 common way to make this symptom disappear. The failure path also prints ssh's own
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
+
+## `vm-restore-test.sh`
+
+The offsite copy is verified faithful and the restore is proven on real hardware,
+but neither answers the question that matters after a dead disk: **starting from
+nothing but the offsite copy, can you rebuild a machine that boots?** This
+rehearses exactly that in a VM, so finding out costs an evening rather than a
+laptop.
+
+    ./vm-restore-test.sh prepare      fetch the ISO, make disks, patch the initrd
+    ./vm-restore-test.sh serve        rsync daemon that decodes --fake-super
+    ./vm-restore-test.sh boot         launch the VM headless, serial on a socket
+    ./vm-restore-test.sh sh "CMD"     run a command in the guest
+    ./vm-restore-test.sh steps        the in-guest restore procedure
+    ./vm-restore-test.sh status       what exists, what is running
+    ./vm-restore-test.sh stop|clean   teardown that never touches other VMs
+
+**It runs on the machine holding the offsite copy**, not on the laptop — the
+snapshot data is local there so nothing crosses Wi-Fi, and a 4GB laptop is a poor
+VM host. `scp` it across and run it there.
+
+Three things had to be solved to make it headless and scriptable, and each one is
+the kind of thing that is miserable to rediscover:
+
+**qemu's `-kernel` direct boot does work alongside UEFI firmware.** That matters
+because the VM must boot EFI — the laptop does, and the ESP is part of what gets
+restored — but a UEFI boot menu needs a screen. Direct boot lets us pass
+`console=ttyS0` and `systemd.unit=multi-user.target`, giving a text-mode live
+session on a serial port instead of a desktop.
+
+**The live session cannot be logged into, and guessing passwords is a dead end.**
+Mint 22.3's live user is `linux` with the password hash `U6aMy0wojraho` — which is
+`crypt("")`, so "empty password" looks right. It isn't: `pam_unix` without
+`nullok` rejects an *entered* empty password before it ever compares the hash. The
+fix is to bypass PAM's password path entirely, so `prepare` unpacks the ISO's
+initrd, patches casper's own `15autologin` hook to also write a serial-getty
+autologin drop-in, and repacks it. That single step is most of why this script
+exists.
+
+**A `--fake-super` archive can only be decoded by a sender that knows about it**,
+and a local copy has no remote sender to tell. Sharing the directory into the
+guest would not help for the same reason. An **rsync daemon with `fake super =
+yes`** is the documented answer: it decodes on the way out, needs no ssh keys or
+passwords, and binds to loopback. From inside the guest the host is always
+`10.0.2.2` under user-mode networking. `serve` proves the decoding works by
+checking `sudo` is still `-rwsr-xr-x` over the wire, rather than assuming.
+
+The teardown is deliberately narrow: it only ever kills the pid in its own
+pidfile, and `status` names any other qemu on the host as *not ours*. That host
+runs a long-lived batocera VM, and a stray `pkill` would have taken it out —
+`pgrep -f` matching this script's own command line already killed one session
+during development.
 
 ## `sysfs-watch.sh` and `who-writes.sh`
 
