@@ -117,6 +117,8 @@ usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autolog
        $0 restore [SNAP] do the whole restore unattended, ending in golden.qcow2
                          (defaults to the newest snapshot)
        $0 testbase       golden.qcow2 + a serial console -> testbase.qcow2
+       $0 verify [IMG]   boot a test image and check this project's fixes took
+       $0 verify-control prove those checks can fail, by breaking three on purpose
        $0 sh "COMMAND"   run a command in the guest and print what it says
        $0 bootdisk [IMG] boot a restored image off the disk (network restricted;
                          defaults to target.qcow2)
@@ -374,7 +376,21 @@ PY
   local i
   for i in $(seq 1 40); do [ -S "$WORK/mon.sock" ] && break; sleep 1; done
   [ -S "$WORK/mon.sock" ] || die "qemu did not start -- see $WORK/qemu-disk.log"
-  ok "booting $(basename "$img") from disk, pid $(cat "$WORK/qemu.pid" 2>/dev/null)"
+
+  # The socket appearing is NOT proof qemu survived. It creates the monitor
+  # before it opens the drives, so an unreadable or corrupt image leaves you a
+  # socket and a dead process -- and everything downstream then waits three
+  # minutes for a login from a VM that never existed. Found by an image
+  # accidentally left root-owned: "Permission denied" sat in the log while this
+  # reported a successful boot.
+  sleep 1
+  local qp; qp=$(cat "$WORK/qemu.pid" 2>/dev/null)
+  if [ -z "$qp" ] || ! kill -0 "$qp" 2>/dev/null; then
+    bad "qemu exited immediately after starting"
+    tail -3 "$WORK/qemu-disk.log" 2>/dev/null | sed 's/^/        /'
+    die "see $WORK/qemu-disk.log"
+  fi
+  ok "booting $(basename "$img") from disk, pid $qp"
   info "network is restricted: the clone cannot reach your tailnet"
   echo "  give it ~90s, then:  $0 screenshot"
 }
@@ -929,6 +945,150 @@ ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear %I 115200 vt220
 X
 
+  # Plant the repo's own helpers. The rig deliberately does NOT reimplement their
+  # checks -- several already have `check`/`status` subcommands, and a second
+  # implementation would drift from the first and start grading the wrong thing.
+  # /home is empty in these snapshots (system-only), so the repo is not in the
+  # image and has to be put there.
+  local repo_src="${MBA_VMTEST_REPO:-$(cd "$(dirname "$0")" && pwd)}"
+  sudo rm -rf "$mnt/opt/mba-verify"
+  sudo mkdir -p "$mnt/opt/mba-verify"
+  if [ -f "$repo_src/kernel-guard.sh" ]; then
+    sudo cp "$repo_src"/*.sh "$mnt/opt/mba-verify/" || die "could not plant the helpers"
+    sudo chmod 755 "$mnt/opt/mba-verify"/*.sh
+    ok "planted $(ls "$repo_src"/*.sh | wc -l) helpers at /opt/mba-verify"
+  else
+    warn "no repo beside $0 -- helper checks will report SKIP"
+    warn "deploy the whole repo, not just this script:  rsync -a ./ HOST:$WORK/"
+  fi
+
+  sudo tee "$mnt/opt/mba-verify/guest-verify.sh" >/dev/null <<'VERIFY'
+#!/bin/sh
+# Runs INSIDE the test image and prints one RESULT line per check.
+# Written by vm-restore-test.sh testbase -- edit it there, not here.
+#
+# It verifies what this project's helpers TRY TO DO, on a machine with none of
+# the hardware they were written for. Three tiers, and only the first two are
+# attempted here:
+#
+#   artefact   the file/rule/firmware survived the restore   -- needs nothing
+#   mechanism  it builds, it loads, the rule matches and acts -- needs a VM
+#   device     Wi-Fi associates, the camera captures, sound comes out
+#              -- needs the metal, and is deliberately NOT guessed at
+REPO=/opt/mba-verify
+K=$(uname -r)
+R() { echo "RESULT $1|$2|$3"; }
+
+# ---------------------------------------------------------------- artefacts
+for spec in \
+  "facetimehd-firmware|/lib/firmware/facetimehd/firmware.bin" \
+  "kbd-backlight-rule|/etc/udev/rules.d/60-applesmc-kbd-backlight.rules" \
+  "webcam-tune-rule|/etc/udev/rules.d/99-mba-webcam-tune.rules" \
+  "kernel-guard-hook|/etc/apt/apt.conf.d/99-mba-kernel-guard"
+do
+  name=${spec%%|*}; path=${spec#*|}
+  if [ -s "$path" ]; then R PASS "artefact:$name" "$path"
+  else R FAIL "artefact:$name" "missing after restore: $path"; fi
+done
+
+# ----------------------------------------------------------------- modules
+dkms_built() { dkms status 2>/dev/null | grep "^$1/" | grep "$K" | grep -q installed; }
+
+for spec in "wl|broadcom-sta" "facetimehd|facetimehd"; do
+  mod=${spec%%|*}; pkg=${spec#*|}
+  if dkms_built "$pkg"; then R PASS "dkms:$mod" "$pkg built for $K"
+  else R FAIL "dkms:$mod" "$pkg NOT built for $K -- this is the stranding case"; fi
+  if modprobe "$mod" 2>/dev/null && lsmod | grep -q "^$mod "; then
+    R PASS "load:$mod" "loads against $K with no hardware present"
+  else
+    R FAIL "load:$mod" "built but will not load against $K"
+  fi
+done
+
+# applesmc is the odd one out and must not be graded like the others: it REFUSES
+# to load without an Apple SMC ("No such device"), where wl and facetimehd load
+# happily and simply bind nothing. So the honest check is that the kernel SHIPS
+# it -- whether it binds is a tier-3 question this rig cannot ask.
+if modinfo applesmc >/dev/null 2>&1; then
+  R PASS "module:applesmc" "shipped by $K (cannot load without an SMC -- expected)"
+else
+  R FAIL "module:applesmc" "no applesmc module in $K"
+fi
+
+# ------------------------------------------------- the kbd-backlight fix
+# The real test of the fix, without an SMC: make a SYNTHETIC LED with the name
+# applesmc would have registered, and ask udev what it does with it.
+#
+# Note it is udevadm test that is the evidence, NOT the resulting trigger value:
+# a fresh uleds LED defaults to "none" anyway, so reading the attribute back
+# would "pass" even with the rule deleted.
+modprobe uleds 2>/dev/null
+python3 - <<'PY' >/dev/null 2>&1 &
+import struct, time
+f = open('/dev/uleds', 'r+b', buffering=0)
+f.write(struct.pack('64si', b'smc::kbd_backlight', 255))
+time.sleep(90)
+PY
+sleep 3
+LED=/sys/class/leds/smc::kbd_backlight
+if [ -d "$LED" ]; then
+  if udevadm test "$LED" 2>&1 | grep -q "60-applesmc-kbd-backlight.rules.*writing 'none'"; then
+    R PASS "rule:kbd-backlight" "udev matched a synthetic LED and wrote trigger=none"
+  else
+    R FAIL "rule:kbd-backlight" "the rule did not act on a synthetic smc::kbd_backlight"
+  fi
+else
+  R SKIP "rule:kbd-backlight" "could not create a synthetic LED (no uleds)"
+fi
+
+# ------------------------------------------------------ the helpers themselves
+if [ -x "$REPO/kernel-guard.sh" ]; then
+  out=$("$REPO/kernel-guard.sh" check 2>&1); rc=$?
+  case "$rc" in
+    0) R PASS "helper:kernel-guard" "check says every installed kernel has its drivers" ;;
+    1) R WARN "helper:kernel-guard" "non-critical gap (camera): $(echo "$out" | grep -c MISSING) kernel(s)" ;;
+    2) R FAIL "helper:kernel-guard" "CRITICAL -- the newest kernel has no wl" ;;
+    *) R FAIL "helper:kernel-guard" "check exited $rc" ;;
+  esac
+else
+  R SKIP "helper:kernel-guard" "not planted at $REPO"
+fi
+
+# Run the backlight helper against the synthetic LED and assert on what it
+# REPORTS, not merely that it exited 0.
+if [ -x "$REPO/kbd-backlight.sh" ] && [ -d "$LED" ]; then
+  out=$("$REPO/kbd-backlight.sh" status 2>&1)
+  # Report WHICH assertion failed, not the first 90 characters of the output.
+  # Dumping the raw text put "trigger none" in the failure line and read exactly
+  # like a pass -- a misleading message is a bug, not a cosmetic issue.
+  trig=no; rule=no
+  echo "$out" | grep -q "trigger *none"        && trig=yes
+  echo "$out" | grep -q "udev rule *installed" && rule=yes
+  if [ "$trig" = yes ] && [ "$rule" = yes ]; then
+    R PASS "helper:kbd-backlight" "reports trigger none and the rule installed"
+  else
+    R FAIL "helper:kbd-backlight" "trigger-is-none=$trig rule-installed=$rule"
+  fi
+else
+  R SKIP "helper:kbd-backlight" "helper or synthetic LED absent"
+fi
+
+# ------------------------------------------------------------------ system
+n=$(systemctl --failed --no-legend --plain 2>/dev/null | wc -l)
+if [ "$n" = 0 ]; then R PASS "system:units" "no failed units"
+else R FAIL "system:units" "$n failed: $(systemctl --failed --no-legend --plain | awk '{print $1}' | tr '\n' ' ')"; fi
+
+sw=$(swapon --show --noheadings 2>/dev/null)
+if echo "$sw" | grep -q zram && echo "$sw" | grep -q swapfile; then
+  R PASS "system:swap" "both tiers up: zram0 and /swapfile"
+else
+  R WARN "system:swap" "expected zram0 and /swapfile, got: $(echo "$sw" | tr '\n' ' ')"
+fi
+
+echo "VERIFY-COMPLETE"
+VERIFY
+  sudo chmod 755 "$mnt/opt/mba-verify/guest-verify.sh"
+
   local m
   for m in dev dev/pts proc sys; do sudo mount --bind "/$m" "$mnt/$m" || die "bind mount /$m failed"; done
   sudo mount "${dev}p1" "$mnt/boot/efi" || die "cannot mount the ESP"
@@ -963,6 +1123,167 @@ X
   info "swapfile.swap (Timeshift excludes /swapfile); testbase supplies one, so"
   info "here anything failed at all is real signal."
   echo
+}
+
+# --------------------------------------------------------------------- verify
+
+# Boot a test image and ask it whether this project's fixes actually took.
+#
+# The checks live in the GUEST (/opt/mba-verify/guest-verify.sh, planted by
+# testbase) rather than being driven one at a time from here. Two reasons: each
+# serial exchange costs seconds and there are a dozen checks, and a check driven
+# remotely can only ever grade what fits in one line of output. Running in the
+# guest, they can run the helpers and read their reports.
+cmd_verify() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  local img="${1:-testbase.qcow2}"
+  case "$img" in /*) ;; *) img="$WORK/$img" ;; esac
+  [ -s "$img" ] || die "no such image: $img -- run '$0 testbase' first"
+
+  cmd_bootdisk "$(basename "$img")" >/dev/null || die "could not boot $img"
+  say "booted $(basename "$img"), waiting for it to come up"
+
+  local i up=0
+  for i in $(seq 1 40); do
+    guest "id" 4 | grep -q "uid=" && { up=1; break; }
+    sleep 5
+  done
+  [ "$up" = 1 ] || die "no login on the serial console after ~3 min -- '$0 screenshot' to see why"
+
+  guest "test -x /opt/mba-verify/guest-verify.sh && echo P''RESENT" 6 | grep -q "^PRESENT" \
+    || die "no verify script in the image -- rebuild it with '$0 testbase'"
+
+  say "running the checks"
+  guest "setsid /opt/mba-verify/guest-verify.sh >/tmp/verify.out 2>&1 </dev/null & echo S''TARTED" 6 \
+    | grep -q "^STARTED" || die "could not start the checks in the guest"
+
+  local out=""
+  for i in $(seq 1 30); do
+    sleep 5
+    out=$(guest "cat /tmp/verify.out" 12)
+    echo "$out" | grep -q "VERIFY-COMPLETE" && break
+  done
+  echo "$out" | grep -q "VERIFY-COMPLETE" || {
+    bad "the checks did not finish"
+    info "look with:  $0 sh 'cat /tmp/verify.out'"
+    return 1
+  }
+
+  # Keep the raw verdicts so verify-control can grade THIS run rather than
+  # re-running the checks and hoping it got the same answers.
+  echo "$out" | grep '^RESULT ' > "$WORK/verify.last"
+
+  # Grade. RESULT lines are status|name|detail.
+  local pass=0 fail=0 warn=0 skip=0 line st nm dt
+  echo
+  while IFS= read -r line; do
+    case "$line" in RESULT\ *) ;; *) continue ;; esac
+    line=${line#RESULT }
+    st=${line%%|*}; line=${line#*|}
+    nm=${line%%|*}; dt=${line#*|}
+    case "$st" in
+      PASS) pass=$((pass+1)); printf '  \033[32m[pass]\033[0m %-26s %s\n' "$nm" "$dt" ;;
+      WARN) warn=$((warn+1)); printf '  \033[33m[warn]\033[0m %-26s %s\n' "$nm" "$dt" ;;
+      SKIP) skip=$((skip+1)); printf '  [skip] %-26s %s\n' "$nm" "$dt" ;;
+      *)    fail=$((fail+1)); printf '  \033[31m[FAIL]\033[0m %-26s %s\n' "$nm" "$dt" ;;
+    esac
+  done <<< "$out"
+
+  echo
+  info "$pass passed, $fail failed, $warn warned, $skip skipped"
+  echo
+  info "Not attempted, and not attemptable here: Wi-Fi association, camera"
+  info "capture, sound output, and whether the backlight physically lights."
+  info "Those need one boot on the metal -- see kernel-guard.sh boot-test."
+  echo
+  [ "$fail" -eq 0 ]
+}
+
+# ------------------------------------------------------------- verify-control
+
+# Prove the checks can FAIL. Without this, "14 passed" is not evidence.
+#
+# This project already works this way elsewhere and for good reason:
+# restore-test.sh grades an UNCHANGED control so a no-op cannot pass by default,
+# and snapshot-offsite.sh's pull-test got 7/7 right with all 7 wrong in the
+# control. A verifier nobody has ever seen fail is an assumption with a progress
+# bar.
+#
+# It breaks three artefacts in a throwaway overlay and asserts that exactly the
+# right checks go red -- including one, rule:kbd-backlight, that must catch the
+# missing rule through BEHAVIOUR (udev acting on a synthetic LED) rather than by
+# re-reading the same file the artefact check already read.
+CONTROL_BREAKS="/etc/udev/rules.d/60-applesmc-kbd-backlight.rules
+/lib/firmware/facetimehd/firmware.bin
+/etc/apt/apt.conf.d/99-mba-kernel-guard"
+
+CONTROL_EXPECT="artefact:facetimehd-firmware
+artefact:kbd-backlight-rule
+artefact:kernel-guard-hook
+rule:kbd-backlight
+helper:kbd-backlight"
+
+cmd_verify_control() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  [ -s "$WORK/testbase.qcow2" ] || die "no testbase.qcow2 -- run '$0 testbase' first"
+  sudo -n true 2>/dev/null || die "this needs root for nbd and mount, and sudo is asking for a password"
+
+  local dev="${MBA_VMTEST_NBD:-/dev/nbd0}"
+  local mnt="$WORK/ctl-mnt"
+  mkdir -p "$mnt"
+
+  ctl_cleanup() {
+    sudo umount "$mnt" 2>/dev/null
+    sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1
+  }
+  trap 'ctl_cleanup' EXIT
+
+  cmd_stop >/dev/null 2>&1
+  sudo modprobe nbd max_part=8 || die "cannot load the nbd module"
+  sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1; sleep 1
+
+  rm -f "$WORK/control.qcow2"
+  # Created as THIS user, deliberately. Building it under sudo leaves a
+  # root-owned image that qemu cannot open, and the failure surfaces three
+  # minutes later as "no login on the serial console".
+  qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/control.qcow2" >/dev/null \
+    || die "could not create the control overlay"
+  sudo qemu-nbd --connect="$dev" "$WORK/control.qcow2" || die "qemu-nbd could not attach the control"
+  sleep 2
+  sudo mount "${dev}p2" "$mnt" || die "cannot mount the control image"
+
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    sudo test -e "$mnt$f" || die "cannot break $f -- it is already missing from testbase"
+    sudo rm -f "$mnt$f"
+    info "broke $f"
+  done <<< "$CONTROL_BREAKS"
+
+  ctl_cleanup
+  trap - EXIT
+  ok "control image built"
+
+  cmd_verify control.qcow2 || true
+
+  # Grade the grader.
+  local failed expected missing unexpected
+  failed=$(awk -F'|' '/^RESULT FAIL\|/ {print $2}' "$WORK/verify.last" 2>/dev/null | sort)
+  expected=$(echo "$CONTROL_EXPECT" | sort)
+  missing=$(comm -23 <(echo "$expected") <(echo "$failed"))
+  unexpected=$(comm -13 <(echo "$expected") <(echo "$failed"))
+
+  say "control result"
+  if [ -z "$missing" ] && [ -z "$unexpected" ]; then
+    ok "exactly the expected $(echo "$expected" | grep -c .) checks failed -- the verifier discriminates"
+    info "and every unrelated check stayed green, so it is not simply failing everything"
+    rm -f "$WORK/control.qcow2"
+    return 0
+  fi
+  [ -n "$missing" ] && { bad "these SHOULD have failed and did not:"; echo "$missing" | sed 's/^/        /'; }
+  [ -n "$unexpected" ] && { bad "these failed unexpectedly:"; echo "$unexpected" | sed 's/^/        /'; }
+  info "control image kept at $WORK/control.qcow2 for inspection"
+  return 1
 }
 
 # ------------------------------------------------------------ status / teardown
@@ -1024,6 +1345,8 @@ case "${1:-status}" in
   restore) cmd_restore "${2:-}" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
   testbase)   cmd_testbase ;;
+  verify)     cmd_verify "${2:-}" ;;
+  verify-control) cmd_verify_control ;;
   bootdisk)   cmd_bootdisk "${2:-}" ;;
   screenshot) cmd_screenshot "${2:-}" ;;
   steps)   cmd_steps ;;

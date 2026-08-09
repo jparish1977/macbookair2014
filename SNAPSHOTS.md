@@ -482,6 +482,41 @@ back with the restore at priority 100 ahead of the disk swapfile, being
 system-side config with no hardware to be missing — so the guest inherits the
 laptop's real two-tier swap rather than an approximation.
 
+### `verify` — checking that everything this repo installs still works
+
+`testbase` plants the repo at `/opt/mba-verify` and `verify` runs the helpers'
+**own** `check`/`status` subcommands rather than reimplementing them, because a
+second implementation drifts from the first and starts grading the wrong thing.
+The checks run *in the guest* — a dozen serial round trips cost minutes, and a
+remotely-driven check can only grade one line of output. **14 checks, all passing
+on a healthy image**, across three tiers: artefact (survived the restore),
+mechanism (builds, loads, the rule acts), device (needs metal, not attempted).
+
+Three things worth carrying:
+
+- **`applesmc` must be graded differently.** It *refuses* to load without an
+  Apple SMC (`No such device`), where `wl` and `facetimehd` load happily and bind
+  nothing. The honest check is that the kernel ships it. Grading it like the
+  others gives a permanent false failure on the one driver whose bug was already
+  chased once.
+- **The keyboard-backlight fix is testable without an SMC.** `uleds` makes a
+  synthetic LED named exactly what `applesmc` would register, and `udevadm test`
+  shows the rule matching it and writing `trigger=none`. It is the `udevadm test`
+  output that is the evidence — a fresh `uleds` LED defaults to `none`, so
+  reading the attribute back would pass with the rule deleted.
+- **`verify-control` proves the checks can fail.** Same discipline as
+  `restore-test`'s unchanged control and `pull-test`'s all-7-wrong control: break
+  three artefacts in a throwaway overlay, and **exactly 5 checks go red while 9
+  stay green**. Five rather than three because the rule and helper checks catch
+  it through *behaviour*, not by re-reading the file the artefact check read.
+
+Two more "passes for the wrong reason" bugs came out of it: **`bootdisk`
+reported success on a VM that never started** (it waited for the QEMU monitor
+socket, which QEMU creates *before* opening the drives — a root-owned image gave
+a socket and a dead process), and **a failure message that read like a pass**
+(dumping 90 characters of helper output put `trigger none` in the failure line;
+it now reports `trigger-is-none=yes rule-installed=no`).
+
 ### Three bugs it took a real run to find
 
 None of these would have shown up in a dry run, and two of them fail *silently*:

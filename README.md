@@ -1257,6 +1257,9 @@ laptop.
     ./vm-restore-test.sh boot         launch the VM headless, serial on a socket
     ./vm-restore-test.sh restore      the whole restore unattended -> golden.qcow2
     ./vm-restore-test.sh testbase     golden.qcow2 + a serial console -> testbase.qcow2
+    ./vm-restore-test.sh verify [IMG] boot it and check this project's fixes took
+    ./vm-restore-test.sh verify-control
+                                      prove those checks can fail
     ./vm-restore-test.sh sh "CMD"     run a command in the guest
     ./vm-restore-test.sh bootdisk [IMG]
                                       boot a restored image (network restricted)
@@ -1410,6 +1413,83 @@ image, not the record of what the restore produced.
 `fallocate` turned out to be enough — `swapon` accepted it and the overlay stayed
 **4.0M**, because a qcow2 grows only on real writes. The `dd` fallback stays in
 for an image that refuses unwritten extents.
+
+### `verify` — does everything this repo installs still work?
+
+    ./vm-restore-test.sh verify              # 14 checks, ~3 minutes
+    ./vm-restore-test.sh verify-control      # prove they can fail
+
+The rig does **not** reimplement the helpers' checks. Several already have
+`check`/`status` subcommands, and a second implementation would drift from the
+first and start grading the wrong thing — so `testbase` plants the repo at
+`/opt/mba-verify` and `verify` runs the real ones. (`/home` is empty in these
+snapshots, so the repo isn't in the image and has to be put there.)
+
+The checks live *in the guest* rather than being driven one at a time over
+serial: a dozen round trips cost minutes, and a remotely-driven check can only
+grade what fits in one line of output. In the guest they can run a helper and
+read its report.
+
+| tier | proves | needs |
+| --- | --- | --- |
+| **artefact** | the file/rule/firmware survived the restore | nothing |
+| **mechanism** | it builds, it loads, the rule matches and acts | a VM |
+| **device** | Wi-Fi associates, the camera captures, sound comes out | metal — **not guessed at here** |
+
+What it checks, all 14 passing on a healthy image:
+
+    artefact   facetimehd firmware, kbd-backlight rule, webcam tune rule,
+               kernel-guard apt hook
+    dkms       broadcom-sta and facetimehd built for the running kernel
+    load       wl and facetimehd both load with no hardware present
+    module     applesmc is shipped (see below)
+    rule       udev acts on a SYNTHETIC smc::kbd_backlight
+    helper     kernel-guard check, kbd-backlight status
+    system     no failed units, both swap tiers up
+
+**`applesmc` is graded differently, and has to be.** It *refuses* to load without
+an Apple SMC — `No such device` — where `wl` and `facetimehd` load happily and
+simply bind nothing. So the honest check is that the kernel ships it; whether it
+binds is a tier-3 question. Grading it like the others would produce a permanent
+false failure on the one driver whose bug was already chased once.
+
+**The keyboard-backlight fix is tested for real, without an SMC.** `uleds` makes
+a synthetic LED named exactly what `applesmc` would have registered, and udev is
+asked what it does with it:
+
+    smc::kbd_backlight: 60-applesmc-kbd-backlight.rules:8
+        ATTR '/sys/devices/virtual/misc/uleds/smc::kbd_backlight/trigger' writing 'none'
+
+Note it is `udevadm test` that is the evidence, **not** the resulting trigger
+value — a fresh `uleds` LED defaults to `none` anyway, so reading the attribute
+back would "pass" with the rule deleted.
+
+#### `verify-control`, because 14 passed is not evidence
+
+A verifier nobody has seen fail is an assumption with a progress bar. This repo
+already works this way — `restore-test.sh` grades an *unchanged* control,
+`pull-test` got 7/7 right with all 7 wrong in the control — so `verify-control`
+breaks three artefacts in a throwaway overlay and asserts exactly the right
+checks go red:
+
+    broke 3 files  ->  5 checks failed, 9 unrelated stayed green
+
+Five, not three, and that is the point: `rule:kbd-backlight` and
+`helper:kbd-backlight` catch the missing rule through **behaviour** — udev acting
+on a synthetic LED, and the helper's own report — rather than by re-reading the
+file the artefact check already read.
+
+Two bugs came out of building it, both of the "passes for the wrong reason"
+family this project keeps finding:
+
+- **`bootdisk` reported success on a VM that never started.** It waited for the
+  QEMU monitor socket, and QEMU creates that *before* opening the drives — so a
+  root-owned image gave a socket, a dead process, and a three-minute wait for a
+  login that could never come. It now checks the pid is alive.
+- **A failure message that read like a pass.** `helper:kbd-backlight` dumped the
+  first 90 characters of the helper's output, which put `trigger none` in the
+  failure line. It now reports which assertion failed —
+  `trigger-is-none=yes rule-installed=no`.
 
 **zram needs no help at all.** `/dev/zram0` comes back with the restore at
 priority 100, ahead of the disk swapfile at -1, because it is configured on the
