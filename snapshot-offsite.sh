@@ -116,6 +116,7 @@ usage: $0 status                what exists both ends, and whether a push can wo
        $0 push --mirror         ... and delete remote snapshots no longer held here
        $0 verify                compare both ends without transferring anything (root)
        $0 watch [SECONDS]       readable progress for a push running elsewhere
+       $0 pull-test [DIR]       prove the copy restores: pull probes back (root)
        $0 restore-help          how to get the tree back, and the trap on the way
 
 This is DISASTER RECOVERY -- for a dead disk. For rolling back a bad update use
@@ -450,6 +451,123 @@ cmd_watch() {
   done
 }
 
+# ------------------------------------------------------------------- pull-test
+
+# Prove the way BACK works, which is the half a push can never demonstrate.
+#
+# The claim under test: a remote tree written with --fake-super restores real
+# ownership and modes when pulled with --fake-super named on the REMOTE side, and
+# silently does not when it is omitted. The second half matters as much as the
+# first -- without it, "the pull worked" might only mean "we did not look".
+#
+# It pulls a handful of probe files rather than 20G, chosen to cover the metadata
+# that actually breaks: a non-root group, setuid bits, a plain file, a symlink.
+# The ground truth is the LOCAL snapshot, which is the same tree the remote copy
+# was made from and is readable here as root.
+PROBES=(
+  etc/shadow          # root:shadow 640 -- non-root GROUP, missed by naive copies
+  etc/gshadow         # same
+  usr/bin/sudo        # root:root 4755 -- setuid, the one with security weight
+  usr/bin/passwd      # setuid
+  usr/bin/wall        # plain 755, the control within the control
+  etc/hostname        # plain 644
+  usr/bin/X11         # a symlink -- stored remotely as a PLACEHOLDER FILE, below
+)
+
+# The symlink probe was expected to fail, on the reasoning that Linux forbids
+# user.* xattrs on symlinks so --fake-super would have nowhere to record one. It
+# passed, and the reason matters more than the result:
+#
+#   remote:  regular file, 1 byte, contents "."   owner joe:joe
+#   xattr:   user.rsync.%stat = "120777 0,0 0:0"
+#                                ^^^^^^ 0120000 is S_IFLNK
+#
+# rsync does not skip symlinks under --fake-super -- it stores each one as an
+# ordinary placeholder file holding the link target, and records the real TYPE in
+# the mode field of the xattr. Pulling with --fake-super reads 120777, sees the
+# symlink bit and recreates a genuine root-owned symlink. (A plain file carries
+# 100644: 0100000 is S_IFREG.) Device and special files are handled the same way.
+#
+# So the offsite copy is NOT a browsable filesystem, and that is the real trap:
+# anything that copies it WITHOUT understanding --fake-super -- cp, tar, scp, or
+# an rsync missing the flag -- propagates placeholder files where symlinks and
+# devices belong, and every mode and owner flattened, while looking like it
+# worked. Treat that tree as an encoded archive, not a directory.
+
+meta_of() { stat -c '%u:%g:%04a' "$1" 2>/dev/null || echo MISSING; }
+
+pull_one() {   # $1 = dest dir, $2 = remote snapshot, $3 = yes|no fake-super
+  local dest="$1" snap="$2" fake="$3" list
+  mkdir -p "$dest" || return 1
+  list=$(mktemp); printf '%s\n' "${PROBES[@]}" > "$list"
+
+  local -a cmd=(rsync -aHAX --numeric-ids --files-from="$list"
+                -e "ssh ${SSH_OPTS[*]} -i $SSH_KEY")
+  [ "$fake" = yes ] && cmd+=(--rsync-path="rsync --fake-super")
+
+  "${cmd[@]}" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/$snap/localhost/" "$dest/" >/dev/null 2>&1
+  local rc=$?
+  rm -f "$list"
+  return $rc
+}
+
+cmd_pull_test() {
+  need_root pull-test
+  local dir="${1:-/var/tmp/mba-pull-test}"
+  rsh true 2>/dev/null || { bad "cannot reach $REMOTE_USER@$REMOTE_HOST"; why_unreachable; exit 1; }
+
+  local snap; snap=$(remote_snaps | tail -1)
+  [ -n "$snap" ] || die "no snapshots on the remote -- run: sudo $0 push"
+  [ -d "$SNAPDIR/$snap" ] || die "the local copy of $snap is gone, so there is no ground truth to grade against"
+
+  echo
+  echo "  pulling probe files from $snap into $dir"
+  echo "  ground truth: the local $SNAPDIR/$snap"
+  echo
+
+  rm -rf "$dir"; mkdir -p "$dir" || die "cannot create $dir"
+
+  pull_one "$dir/with-fake-super" "$snap" yes || die "the --fake-super pull failed outright"
+  pull_one "$dir/without"         "$snap" no  || warn "the control pull failed outright (still informative)"
+
+  local FAILED=0 ctrl_differs=0 p want got_w got_n
+  printf '  %-16s %-18s %-18s %s\n' FILE 'SNAPSHOT (truth)' 'PULLED --fake-super' 'PULLED WITHOUT'
+  for p in "${PROBES[@]}"; do
+    want=$(meta_of "$SNAPDIR/$snap/localhost/$p")
+    got_w=$(meta_of "$dir/with-fake-super/$p")
+    got_n=$(meta_of "$dir/without/$p")
+    printf '  %-16s %-18s %-18s %s\n' "$(basename "$p")" "$want" "$got_w" "$got_n"
+    [ "$got_w" = "$want" ] || FAILED=$((FAILED + 1))
+    [ "$got_n" = "$want" ] || ctrl_differs=$((ctrl_differs + 1))
+  done
+
+  echo
+  if [ "$FAILED" = 0 ]; then
+    ok "every probe came back with its real owner, group and mode"
+  else
+    bad "$FAILED probe(s) did NOT come back correctly -- the offsite copy is not"
+    echo "        restorable as it stands. Do not rely on it until this is understood."
+  fi
+
+  # The control. If pulling WITHOUT --fake-super produced identical metadata, then
+  # this test proves nothing -- something else is supplying the ownership and the
+  # passing result above is not evidence.
+  if [ "$ctrl_differs" -gt 0 ]; then
+    ok "control: $ctrl_differs probe(s) came back WRONG without --fake-super,"
+    echo "        so the flag is doing the work and this test can actually fail"
+  else
+    warn "control: omitting --fake-super changed nothing. The result above is"
+    echo "        therefore not evidence -- find out what is really supplying"
+    echo "        the metadata before trusting it."
+    FAILED=$((FAILED + 1))
+  fi
+
+  echo
+  echo "  probe copies left in $dir for inspection. Remove with:  sudo rm -rf $dir"
+  echo
+  return "$FAILED"
+}
+
 # ---------------------------------------------------------------- restore-help
 
 cmd_restore_help() {
@@ -485,10 +603,26 @@ cmd_restore_help() {
      --skip-grub on EFI, and the wl/DKMS trap that decides whether you come back
      with a network.
 
-  A caveat worth knowing before you depend on this: the pull is the one step
-  never exercised on real hardware. The push and its verification have been. If
-  you want it proven, pull into an empty directory somewhere with room and check
-  the ownership survived -- that costs a transfer, not a machine.
+  THE COPY IS AN ENCODED ARCHIVE, NOT A BROWSABLE FILESYSTEM.
+
+  Under --fake-super every file on the remote is owned by the remote account with
+  its real owner, group, mode AND TYPE parked in a user.rsync.%stat xattr.
+  Symlinks, devices and special files are stored as ordinary placeholder files;
+  /usr/bin/X11 is a 1-byte regular file there containing ".", tagged 120777.
+
+  So anything that copies that tree WITHOUT understanding --fake-super -- cp,
+  tar, scp, or an rsync missing the flag -- silently produces placeholder files
+  where symlinks belong, every mode flattened and everything owned by one user.
+  It looks like it worked. Only rsync, with --fake-super naming the side that
+  holds the xattrs, reads it correctly.
+
+  Proven on 2026-08-09 with '$0 pull-test': 7 of 7 probes came back with their
+  real owner, group and mode -- including setuid 4755 on sudo and passwd, the
+  non-root group on /etc/shadow, and the symlink. The control, pulling the same
+  files without --fake-super, got all 7 wrong: everything owned 1000:1000 and
+  BOTH SETUID BITS GONE. A system recovered that way boots and cannot escalate.
+
+  Re-run pull-test any time; it copies seven files, not 20G.
 
 EOF
 }
@@ -498,6 +632,7 @@ case "${1:-status}" in
   push)                shift; cmd_push "$@" ;;
   verify)              cmd_verify ;;
   watch)               cmd_watch "${2:-60}" ;;
+  pull-test)           cmd_pull_test "${2:-}" ;;
   restore-help|help)   cmd_restore_help ;;
   *)                   usage ;;
 esac

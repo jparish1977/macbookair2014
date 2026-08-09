@@ -1019,6 +1019,38 @@ and the default behaviour is to discard the partial file and start that file ove
 transfer — scoped to the command, so there is no power setting left changed
 afterwards. Lid-close is a separate switch it cannot cover.
 
+### The pull is tested too, with a control
+
+`pull-test` proves the way back, which a push can never demonstrate. It copies
+seven probe files rather than 20G, chosen to cover the metadata that actually
+breaks, and grades them against the local snapshot the remote copy was made from:
+
+    FILE       SNAPSHOT (truth)   WITH --fake-super   WITHOUT (control)
+    shadow     0:42:0640          0:42:0640           1000:1000:0640
+    sudo       0:0:4755           0:0:4755            1000:1000:0755
+    X11        0:0:0777           0:0:0777            1000:1000:0777
+
+**7 of 7 correct, and all 7 wrong in the control** (2026-08-09). The control is
+what makes it evidence: if omitting the flag changed nothing, the pass would only
+mean something else was supplying the ownership, and the script says so and fails
+rather than claiming a win.
+
+Look at the `sudo` row. Recovered without `--fake-super` you get a system where
+`sudo` and `passwd` are **not setuid and owned by a normal user** — it boots, and
+nothing can escalate.
+
+**The copy is an encoded archive, not a browsable filesystem.** The symlink probe
+was expected to fail, since Linux forbids `user.*` xattrs on symlinks. It passed,
+and why matters more than that it did: rsync stores each symlink as an ordinary
+placeholder file containing the link target, recording the real *type* in the
+mode field — `120777`, where `0120000` is `S_IFLNK`. On the remote, `/usr/bin/X11`
+is a 1-byte regular file containing `.`. Devices and special files work the same
+way.
+
+So anything that copies that tree without understanding `--fake-super` — `cp`,
+`tar`, `scp`, or an rsync missing the flag — produces placeholder files where
+symlinks belong and flattens every mode and owner, while looking like it worked.
+
 ### Two measurement mistakes worth not repeating
 
 **`du -sb` answers a different question than "will this fit".** The pre-flight

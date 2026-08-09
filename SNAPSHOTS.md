@@ -180,9 +180,20 @@ Step 1 and 2 below are done; step 3 is still optional and still not done.
    `--fake-super`, named on the remote side.** Omit it and rsync cheerfully
    hands you a tree owned by your own user with every mode wrong, which looks
    like it worked. `snapshot-offsite.sh restore-help` spells out the procedure.
-   **The pull is the one step never exercised** — the push and its verification
-   have been. Proving it costs a transfer into a spare directory, not a machine,
-   and until someone does it the last mile rests on reading the manual correctly.
+
+   **The pull is tested too, 2026-08-09: 7 of 7 probes correct, all 7 wrong in
+   the control.** `pull-test` copies seven probe files rather than 20G and grades
+   them against the local snapshot. Without `--fake-super` everything comes back
+   owned `1000:1000` with **both setuid bits gone** — a recovered system that
+   boots and cannot escalate. The control is what makes the pass evidence rather
+   than an assumption.
+
+   One thing that surfaced there: **the offsite copy is an encoded archive, not a
+   browsable filesystem.** rsync stores symlinks, devices and special files as
+   ordinary placeholder files, recording the real type in the xattr's mode field
+   (`120777`, where `0120000` is `S_IFLNK`); `/usr/bin/X11` is a 1-byte file
+   containing `.` over there. So `cp`, `tar`, `scp` or an rsync without the flag
+   will copy that tree into something broken that looks fine.
 
 Do **not** set Timeshift's target to NFS from iteration8 and call it done. That
 is the configuration that fails in the one scenario it was installed for — and
