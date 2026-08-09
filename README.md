@@ -491,6 +491,70 @@ close to it.
 Reading another user's report needs root — Xorg's are root-owned — so `list`
 works unprivileged but `show` generally wants `sudo`.
 
+### The Xorg crash: what the coredump actually said
+
+`/var/crash` was cleared on 2026-08-08 to start a clean observation window. The
+first report to land was 2026-08-09, on the `6.17.0-42` boot-test — signal 6,
+`SIGABRT`, no `AssertionMessage`, no `XorgLog`, nothing but a 3.5MB coredump.
+
+`apport-retrace -s` on the saved report gave a usable trace *without* any
+`-dbgsym` packages, because the crash came from this machine running the same
+package version still installed, so gdb resolved the exported symbols:
+
+    #12 main
+    #11 InitOutput()                    <- Xorg setting up screens
+    #10 ?? in modesetting_drv.so        <- inside the modesetting driver
+    #9  <signal handler called>         <- a fatal signal arrived HERE
+    #8  ??
+    #7  FatalError()
+    #6  ??
+    #5  OsAbort()
+    #4  abort()  ->  raise(6)  ->  SIGABRT
+
+**Frame #9 is the one that matters, and it inverts the obvious reading.** The
+`SIGABRT` is not the fault — Xorg took a fatal signal *inside*
+`modesetting_drv.so` during `InitOutput()`, and its own handler turned that into
+`FatalError → OsAbort → abort`. So `Signal: 6` in the report is the symptom of
+Xorg's error path, not a failed assertion. Any crash routed through `FatalError`
+will look like `SIGABRT` here.
+
+**A near-miss on the same code path, same night.** The very next boot (back on
+`7.0.0-28`) *also* failed to start lightdm, but cleanly:
+
+    (EE) open /dev/dri/card0: No such file or directory
+    (EE) Device(s) detected, but none match those in the config file
+    Fatal server error: no screens found          -> exit(1), no coredump
+
+Xorg started at 12.5s, before the DRM device existed, declined, and systemd's
+restart succeeded at 14.1s. Both failures are `modesetting` during `InitOutput`
+at the same moment of boot, gated on when `/dev/dri/card0` appears — graceful if
+you lose the race cleanly, a fatal signal if you lose it mid-probe. That is a
+hypothesis, not a conclusion.
+
+**Do not read matching restart counts as the same fault.** Both boots showed
+exactly one `lightdm.service: Main process exited` and two lightdm PIDs, which
+looked like one recurring problem. The timings differed — 1s versus 9s — and the
+causes turned out to be different. The counts were the misleading part.
+
+**Two things that make the next one cheaper to diagnose:**
+
+- **A pending report blocks the next one.** Apport will not write a second report
+  for the same executable while one exists, so leaving it in `/var/crash`
+  silently suppresses collection. Copy it out, then delete it, to keep the
+  evidence *and* re-arm capture.
+- **When apport has no `XorgLog`, read `/var/log/Xorg.0.log.old`.** That is the
+  previous Xorg invocation — on a fail-then-retry boot it is the failed one, and
+  it explained the second failure entirely. It only survives until the next
+  restart, so grab it early.
+
+The discriminating experiment is already running: `/var/crash` is clear, so the
+next crash is captured automatically, and **which kernel it happens on** is the
+answer. Another on `7.0.0-28` means the kernel is irrelevant; only ever on
+`6.17.0-42` means it is not. A fully symbolised trace needs Ubuntu's ddebs repo
+and `xserver-xorg-core-dbgsym`, which would name frames #10, #8 and #6.
+
+The saved report is `~/xorg-crash-6.17.0-42-2026-08-09.crash`, outside the repo.
+
 ## `optimize-mba.sh`
 
 Memory and disk tuning for 4GB. In order: reclaim disk, drop Timeshift

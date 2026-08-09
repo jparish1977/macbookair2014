@@ -126,7 +126,8 @@ closing it. What is still *not* covered, deliberately:
 
 ## The shape, as implemented
 
-Step 1 and 2 below are done; step 3 is still optional and still not done.
+All three steps below are done. Step 3 (the offsite copy) was implemented and
+verified on 2026-08-08/09, and the full recovery path rehearsed in a VM.
 
 1. **Local Timeshift, system-only, on demand.** Excludes `/home/*/`, `/root` and
    `/var/lib/flatpak`. The home pattern is a wildcard rather than one named user:
@@ -563,4 +564,4 @@ Three things bite when bouncing, none of them Timeshift's fault:
 | Jenni's MacBookAir6,1 | four pending items in `~/jenni-camera-todo.md`; her machine is also the last thing gating the upstream applesmc patch |
 | applesmc upstream patch | drafted and fully tested, `patches/upstream-applesmc-nand-disk.md`, not sent |
 | Wi-Fi lockups | trigger corroborated (connection bursts, ~254 sockets); the power-save experiment is confounded — see `WIFI.md` |
-| Xorg crash | `/var/crash` is still empty, but **the observation clock was reset**: the restore and bounce testing rebooted this machine repeatedly on 2026-08-08/09, and the restores reverted `/var/log/wtmp` as well, so `last reboot` no longer even shows the earlier boots (`wtmp begins 21:08:54`). Treat the window as starting from the final boot, not 17:31. `crash-report.sh` reads any new one |
+| Xorg crash | **First report captured 2026-08-09**, on the `6.17.0-42` boot-test. Retrace says the `SIGABRT` is Xorg's own `FatalError` path — the real fault was a fatal signal *inside* `modesetting_drv.so` during `InitOutput()`. The next boot (7.0.0-28) failed the same code path cleanly (`no screens found`, `/dev/dri/card0` not yet present), so a DRM-availability race is the working hypothesis, not a conclusion. Full write-up under [`crash-report.sh`](#crash-reportsh); coredump kept at `~/xorg-crash-6.17.0-42-2026-08-09.crash`. `/var/crash` is clear, so **which kernel the next one lands on is the discriminator** |
