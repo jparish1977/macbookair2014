@@ -26,6 +26,8 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 | --- | --- |
 | [`kernel-guard.sh`](#kernel-guardsh) | Apt hook: warn *before* a reboot that would leave the machine with no Wi-Fi |
 | [`apt-rollback.sh`](#apt-rollbacksh) | Undo a bad apt transaction precisely, from apt's own records |
+| [`system-snapshot.sh`](#system-snapshotsh) | A local known-good snapshot for when you *don't* know what changed |
+| [`restore-test.sh`](#restore-testsh) | Prove the restore works *before* you need it, with a control condition |
 
 **Working out what is actually wrong**
 
@@ -49,7 +51,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 | | |
 | --- | --- |
 | [`WIFI.md`](#wifimd) | Why `mba-wifi.sh` is so defensive; the panic history; the lockup trigger |
-| [`SNAPSHOTS.md`](#snapshotsmd) | Why rollback here is apt-level rather than Timeshift, and what that leaves uncovered |
+| [`SNAPSHOTS.md`](#snapshotsmd) | Why rollback here is apt-level *and* local-snapshot, and why never remote |
 | [`MACOS.md`](#macosmd) | Whether OpenCore can run newer macOS on this model |
 | [`patches/`](#patches) | The facetimehd fix in use, and the applesmc patch drafted for upstream |
 
@@ -688,12 +690,13 @@ transactions to late July on this machine. `/var/cache/apt/archives` often still
 holds the .deb. So "undo that update" is answerable for free, and it puts back
 exactly what changed instead of rolling the whole system back to Tuesday.
 
-This exists **instead of Timeshift**, which was considered and declined for this
-job. A first snapshot is ~21G against 54G free, and the machine's genuinely
+This was built **before Timeshift**, not instead of it. The machine's genuinely
 dangerous updates — kernels — are already covered better by held fallbacks, the
-GRUB menu and `kernel-guard.sh`. Snapshots remain the right tool for the other
+GRUB menu and `kernel-guard.sh`, and package breakage is precisely revertible
+from apt's own records for free. Snapshots remain the right tool for the other
 case: something broke, you do not know what changed, or the damage is outside
-dpkg. This tool says so rather than pretending otherwise.
+dpkg. This tool says so rather than pretending otherwise, and
+[`system-snapshot.sh`](#system-snapshotsh) now covers that case.
 
 It prints commands and stops. `--run` simulates, shows the plan, and asks.
 
@@ -711,6 +714,185 @@ revert these with apt", then printed a command removing
 Ethernet. Advice followed by the means to ignore it is worse than silence.
 Kernel packages are now filtered out of every generated command and listed
 separately as deliberately omitted.
+
+## `system-snapshot.sh`
+
+The other half of rollback: a **local**, system-only, on-demand Timeshift
+snapshot, for when something broke and you do not know what changed.
+
+    ./system-snapshot.sh status              what is configured, and whether it is sane
+    sudo ./system-snapshot.sh configure      make the config match SNAPSHOTS.md
+    sudo ./system-snapshot.sh create "why"   one snapshot, tagged on-demand
+    ./system-snapshot.sh list                what exists (instant)
+    ./system-snapshot.sh list --sizes        ... with real sizes (slow — see below)
+    sudo ./system-snapshot.sh prune [N]      keep the newest N (default 3)
+    sudo ./system-snapshot.sh check-esp      what a restore would do to the ESP
+    ./system-snapshot.sh restore-help        the procedure, and the local traps
+
+`status` needs no root and is the one to run first. Reach for
+`apt-rollback.sh` before this — if you know which update broke it, reverting
+those packages beats rolling back 18G.
+
+**Why it refuses a remote target.** This laptop has no Ethernet port. Wi-Fi is
+the only interface and it depends on `wl` from broadcom-sta, which has already
+failed a kernel transition once (see [`WIFI.md`](#wifimd)). So the likeliest bad
+update is one that costs you the network — and a snapshot on iteration8 is
+unreachable at exactly that moment. A live USB does not rescue you either; the
+live session needs the same driver. So the script hard-refuses network
+filesystems, refuses filesystems that cannot hardlink (without hardlinks every
+snapshot is a full 18G copy, not a ~1G delta), and refuses **remote block
+devices** — iSCSI and NBD hand you a `/dev` node with a real UUID that looks
+local and disappears with the network.
+
+Snapshots are on demand, never scheduled: on a 4GB machine a scheduled snapshot
+is disk churn you did not ask for at a time you did not pick. `configure`
+disables every schedule and `status` complains if something re-enables them.
+
+Measured on this machine: the **first** snapshot took ~4 minutes for 18G (741,884
+files; 53.5G free before, 36G after), and the pre-flight estimate was accurate to
+about 1%. Six snapshots occupy **20G in total**. Each incremental cost ~437M, and
+taking it apart explained all but 3 MB of that:
+
+| ~196M | 50,246 directory inodes at 4K — directories **cannot** be hardlinked, so every snapshot pays for the whole tree |
+| --- | --- |
+| ~165M | `/var/log` churn — rsync copies whole files, so an appended log cannot share with the previous snapshot |
+| ~75M | `rsync-log` + `rsync-log-changes`, which Timeshift writes *inside* every snapshot |
+
+That gave a testable prediction: rotate the oversized log and the next incremental
+should still cost ~437M (the rotated file is new, so it is copied once), and the
+one after should fall to ~290M. Measured **446M, then 291M** — `/var/log` churn
+went 165M → 16M.
+
+So the steady-state floor is **~271M per snapshot even when nothing has changed**,
+and **93% of a quiet incremental is structural overhead rather than your data**.
+
+Two things this turned up that are not about snapshots at all, and cost real time
+to work out — see [`SNAPSHOTS.md`](#snapshotsmd) for the full write-up:
+**`logrotate.service` sets `ConditionACPower=true`**, so on a laptop "weekly"
+means "weekly, if you are plugged in at midnight"; and forcing a rotation with
+`logrotate -f /etc/logrotate.d/rsyslog` **fails with a misleading "insecure
+permissions" error**, because passing a fragment directly skips
+`/etc/logrotate.conf` and its `su root adm`. Use `logrotate -f
+/etc/logrotate.conf`.
+
+> **On the FIRST snapshot the percentage sits at `0.00% complete (??? remaining)`
+> for the whole run. It is not stalled.** The rsync command Timeshift builds has
+> no `--info=progress2` and no `--progress`, so Timeshift counts rsync's itemized
+> output against an expected file total — and that total comes from the *previous*
+> snapshot's `file_count` in its `info.json`. With no parent there is no
+> denominator, hence `???`. **Later snapshots do show real progress**, because by
+> then there is a parent to divide by. Watch `df -h /` during the first one; free
+> space falls toward the predicted number. Do not kill it.
+
+> **Timeshift may also print one stray line after it finishes:**
+> `/tmp/timeshift-XXXX/NNNN: line 10: status: No such file or directory`. That is
+> its own bug — it captures exit codes with `echo ${exitCode} > status`, a
+> *relative* redirect, and its cleanup deletes the temp dir first, so the
+> wrapper's cwd is gone. The snapshot is fine. `create` verifies the result
+> rather than asking you to believe that, and says so.
+
+### Five things writing it caught
+
+**The obvious locality check was wrong in the dangerous direction.** Checking
+"is `/timeshift` on ext4?" only works when the backup device *is* the root
+device. Point Timeshift at any other device and it mounts that under `/run` at
+run time, so `/timeshift` describes a filesystem the snapshots never touch — the
+check would print "ok, local ext4" while rsync wrote to an NFS server. That is
+precisely the failure the script exists to prevent, so the check follows the
+config rather than a hardcoded path.
+
+**A UUID does not mean a local disk.** Timeshift's config takes a UUID, which
+invites exactly that assumption. iSCSI and NBD satisfy it. The check now looks at
+the parent disk's transport — `TRAN` is empty on partitions, so asking about
+`/dev/sda2` tells you nothing and you have to ask `/dev/sda`.
+
+**`du -sx /` overstated the snapshot by 3.9G.** That difference is `/swapfile`,
+which Timeshift excludes by default (`strings /usr/bin/timeshift | grep
+swapfile`). Counting it turns a real 18.0G snapshot into 22.3G and could refuse
+one that fits comfortably. The estimator now mirrors Timeshift's built-in
+exclusions. Worth knowing separately: that swapfile is **active swap** at
+priority -1 behind zram0 at 100, and is in `/etc/fstab` — it is the overflow
+path, not 3.9G of reclaimable junk.
+
+**An exit code of 0 was not enough.** Timeshift's stray `status: No such file or
+directory` line (above) lands in the middle of this script's output, which makes
+a successful snapshot look broken. Rather than annotate it away, `create` now
+checks the artefacts: `info.json` is written *after* rsync and *after* tagging,
+so its presence plus a plausible `file_count` and a non-empty `localhost/` tree
+is the real completion marker. A rescue tool that says "probably fine" is not
+doing its job.
+
+**`du` per snapshot doubled the reported disk usage.** Listing two snapshots ran
+`du` once per snapshot and printed `18G` for each — but they occupy 19G between
+them, not 36G. Every separate invocation counts the same shared inodes again. The
+giveaway was that taking the second snapshot moved free space by zero. `list` now
+runs **one** `du -shxc` over all snapshots oldest-first, so each inode is counted
+once and attributed to the first path that referenced it; the column became
+`ADDS` — what each snapshot costs on top of the older ones — with a real total:
+
+    NAME                   ADDS      REASON
+    2026-08-08_18-29-26    18G       first known-good
+    2026-08-08_18-42-18    437M      test
+
+    2 snapshot(s), 19G on disk in total, 35.1G free
+
+This also fixes a worse misconception it was feeding: that deleting the oldest
+snapshot reclaims ~18G. It reclaims almost nothing, because a file is only freed
+when the *last* snapshot referencing it goes. `prune` now says so before asking
+for confirmation, and reports the actual difference afterwards.
+
+**Those honest sizes cost two minutes, so they are no longer the default.** One
+`du` across every snapshot is the only way to attribute hardlinked data correctly,
+but at 7 snapshots of ~742k files that is ~5.2M stat calls: **1m57s** measured (11s
+user, 54s sys, the rest I/O). `create` called it, so every snapshot ended with a
+growing stall *after* the work was done — it read as a hang. `list` is now instant
+(names, `file_count` from the `info.json` Timeshift already wrote, and comments)
+and sizing moved behind `list --sizes`, which prints a time estimate before it
+starts rather than going silent:
+
+    1m56.7s  ->  0.079s
+
+## `restore-test.sh`
+
+A snapshot you have never restored is 18G of decoration. This proves the restore
+works, on a schedule you choose, instead of finding out on the day something is
+broken.
+
+    sudo ./restore-test.sh arm       plant markers, write the manifest to $HOME
+    sudo ./restore-test.sh break     modify, delete, add, edit a conf, install a package
+    ./restore-test.sh state          what the markers look like right now
+    ./restore-test.sh verify         grade the restore (no root needed)
+
+The sequence is `arm` → `system-snapshot.sh create` → `break` → restore → reboot
+→ `verify`. **Run on this machine 2026-08-08: all six checks passed.**
+
+Three things make it a real test rather than a reassuring one:
+
+**There is a control.** One marker is never touched. A restore that silently did
+nothing would pass every other check — "the file I did not modify is unmodified"
+only means something when the other five moved. It is the check that makes the
+result evidence.
+
+**The manifest lives in `$HOME`, outside the snapshot.** Put your expected values
+anywhere on the system side and the restore reverts the thing you were about to
+grade the restore against. The same applies to anything else you want to survive
+as evidence.
+
+**It covers four rsync classes plus dpkg state.** Modified, deleted, added and
+unchanged files exercise different paths — in particular, `added.txt` can only
+disappear via `--delete`, which is the behaviour most likely to surprise you
+elsewhere. The `hello` package proves `/var/lib/dpkg/status` came back too, so
+the package database matches the filesystem rather than drifting from it.
+
+Restore the baseline taken *after* `arm`, never an older snapshot: an older one
+has no markers, so the restore deletes them as unknown files and every check
+fails for the wrong reason.
+
+What running it actually taught — both findings are in
+[`SNAPSHOTS.md`](#snapshotsmd), and neither would have shown up on a test machine:
+`--skip-grub` does not keep the restore out of the EFI system partition, and a
+restore rewinds `/var/log/apt/history.log`, which is the only thing
+[`apt-rollback.sh`](#apt-rollbacksh) reads.
 
 ## `sysfs-watch.sh` and `who-writes.sh`
 
@@ -844,13 +1026,19 @@ nobody credits the wrong change months from now.
 
 ## `SNAPSHOTS.md`
 
-Why rollback on this machine is `apt-rollback.sh` rather than Timeshift, with
-the measured numbers, and — more usefully — **what that decision leaves
-uncovered** and what to do if you revisit it.
+The rollback decision on this machine, with the measured numbers, what it leaves
+uncovered, and where it was left.
 
 The short version: a snapshot on another host is unreachable in the exact
 scenario it was installed for, because the likeliest bad update here costs you
-the only network interface.
+the only network interface. So rollback is `apt-rollback.sh` when you know what
+changed, and a **local** `system-snapshot.sh` when you do not — never a remote
+snapshot target.
+
+It also records the restore test of 2026-08-08 — 6 of 6 checks passed — and the
+two findings that only surfaced by running it on the real hardware: the restore
+crosses into the EFI system partition despite `--skip-grub`, and it rewinds
+`/var/log/apt/history.log`, which is `apt-rollback.sh`'s only input.
 
 ## Prior art, and claims checked against this machine
 
