@@ -233,6 +233,54 @@ and `/root/**` that Timeshift appends itself.
   before rebooting, and keep the 6.17 fallbacks held. The test came back on
   `7.0.0-28-generic` with `wl` loaded and Wi-Fi up, and the udev keyboard-backlight
   rule and the kernel-guard apt hook both survived.
+- **A restore is not checksum-verified.** Timeshift restores with `rsync -avir
+  --force --delete` and **no `--checksum`**, so rsync's quick check applies: a
+  file is skipped when its size matches *and* its mtime matches to the second.
+  A file rewritten in the same second it was snapshotted, at the same size,
+  is silently not restored. In normal use the window is tiny — a snapshot you
+  restore is hours or days old — but it means a restore is a fast reconstruction,
+  not a guaranteed byte-for-byte one. This was found the hard way: the bounce
+  test's first markers were both 8 bytes and written milliseconds apart, and the
+  restore skipped them, reporting a failure that had not happened. The markers
+  now differ in length so the quick check cannot fire.
+
+## Bouncing between restore points
+
+Restore points are **not one-way**, and a restore does not consume the ones newer
+than it. The enabling detail is that `/timeshift/*` is in the exclude list, so a
+restore never touches the snapshot store: the restore log shows `timeshift/`
+exactly once, as `.d..t......`, a directory timestamp with no recursion into it.
+Combined with rsync-mode snapshots each being a *complete* hardlinked tree rather
+than a diff against a parent, any snapshot restores independently of the others,
+in any order, as often as you like.
+
+`restore-test.sh bounce-arm` proves it rather than asserting it. It builds two
+full states, snapshots each, and leaves you on B; you restore A, reboot,
+`bounce-verify A`, restore B, reboot, `bounce-verify B`. Each state holds a file
+the other lacks, so **every hop must both create and delete** — a restore that
+only ever added files back would pass a one-way test and fail this one. The last
+two checks are the real point: that the snapshot you rolled *past* still exists,
+and that its contents still checksum correctly, because that is the only thing
+that makes the way back real.
+
+**Yes, snapshot before restoring.** For a bounce it is not optional — the forward
+destination has to exist on disk before you hop backwards. In general it is your
+undo-the-undo: the restore overwrites the state you are leaving, and without a
+snapshot that state is gone. It costs ~300–450M and about a minute. Two
+exceptions: not when you are restoring *because* the disk is full, and not worth
+it if the disk itself is failing.
+
+Three things bite when bouncing, none of them Timeshift's fault:
+
+- **`/home` never moves.** The system side hops; your home directory does not.
+  Roll back a month and `~/.config` is still today's. That is the usual reason a
+  bounce feels broken when nothing has actually failed.
+- **Anything created and never snapshotted dies on the first backward hop.**
+  `--delete` removes system-side files absent from the target. Going forward
+  restores whatever the forward snapshot holds — but a file that lived only in
+  the running system, in no snapshot at all, is gone at the first hop.
+- **Every hop rewinds `/var/log/apt/history.log`,** so `apt-rollback.sh`'s view of
+  history changes under you each time.
 
 ## Where this was left
 

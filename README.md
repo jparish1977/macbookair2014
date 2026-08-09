@@ -858,10 +858,12 @@ A snapshot you have never restored is 18G of decoration. This proves the restore
 works, on a schedule you choose, instead of finding out on the day something is
 broken.
 
-    sudo ./restore-test.sh arm       plant markers, write the manifest to $HOME
-    sudo ./restore-test.sh break     modify, delete, add, edit a conf, install a package
-    ./restore-test.sh state          what the markers look like right now
-    ./restore-test.sh verify         grade the restore (no root needed)
+    sudo ./restore-test.sh arm             plant markers, write the manifest to $HOME
+    sudo ./restore-test.sh break           modify, delete, add, edit a conf, install a package
+    ./restore-test.sh state                what the markers look like right now
+    ./restore-test.sh verify               grade the restore (no root needed)
+    sudo ./restore-test.sh bounce-arm      build two restore points, A and B
+    ./restore-test.sh bounce-verify A|B    grade a hop between them
 
 The sequence is `arm` → `system-snapshot.sh create` → `break` → restore → reboot
 → `verify`. **Run on this machine 2026-08-08: all six checks passed.**
@@ -893,6 +895,31 @@ What running it actually taught — both findings are in
 `--skip-grub` does not keep the restore out of the EFI system partition, and a
 restore rewinds `/var/log/apt/history.log`, which is the only thing
 [`apt-rollback.sh`](#apt-rollbacksh) reads.
+
+### `bounce-arm`: are restore points one-way?
+
+No. A restore never touches the snapshot store (`/timeshift/*` is excluded), so
+snapshots newer than the one you restore survive being rolled past, and you can
+go forward into them again. `bounce-arm` builds two complete states, snapshots
+each, and `bounce-verify A|B` grades each hop — including that the snapshot you
+rolled *past* still exists **and still checksums correctly**, which is the only
+thing that makes the way back real.
+
+Each state holds a file the other lacks, so every hop must both create and
+delete. A restore that only ever put files back would pass the one-way test and
+fail this one.
+
+Building it turned up a property of Timeshift restores worth knowing: **they are
+not checksum-verified.** The restore is `rsync -avir --force --delete` with no
+`--checksum`, so rsync's quick check applies — same size and same mtime *to the
+second* means the file is skipped. The first version of these markers was two
+8-byte files written milliseconds apart, and the restore skipped them, reporting
+a failure that had not happened. The markers now differ in length so the quick
+check cannot fire. In real use the window is small, but a restore is a fast
+reconstruction rather than a guaranteed byte-for-byte one.
+
+Snapshot before restoring — for a bounce it is not optional, since the forward
+destination has to exist before you hop backwards.
 
 ## `sysfs-watch.sh` and `who-writes.sh`
 
