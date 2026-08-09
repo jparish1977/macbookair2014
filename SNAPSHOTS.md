@@ -277,6 +277,11 @@ and `/root/**` that Timeshift appends itself.
   staged in the ESP by fwupd that `--delete` would silently discard.
   `system-snapshot.sh check-esp` reports exactly that, and the whole ESP is 6.1 MB
   of a 511 MB partition, so backing it up first costs nothing.
+- **A restore rewinds logs generally, not just one.** `/var/log/wtmp` comes back
+  with everything else, so after a restore `last reboot` shows a truncated boot
+  history — on 2026-08-09 it began at the restore itself, erasing the record of
+  the boots before it. Harmless, but disconcerting if you are using boot history
+  to date something, and it is the same mechanism as the apt case below.
 - **A restore rewinds apt's own history.** `/var/log/apt/history.log` is inside
   the snapshot, so after a restore `apt-rollback.sh` cannot see anything that
   happened after it was taken — including the transaction you just undid. The
@@ -302,6 +307,34 @@ and `/root/**` that Timeshift appends itself.
   test's first markers were both 8 bytes and written milliseconds apart, and the
   restore skipped them, reporting a failure that had not happened. The markers
   now differ in length so the quick check cannot fire.
+
+## A restored system is a second copy of your machine's identity
+
+The single most important thing learned from rehearsing recovery, and it is not
+about snapshots at all — it is about what a snapshot *contains*.
+
+Machine identity lives on the system side, so it is inside every snapshot:
+
+    /var/lib/tailscale/tailscaled.state    the tailnet NODE KEY
+    /etc/machine-id, /var/lib/dbus/machine-id
+    /etc/ssh/ssh_host_*_key
+
+Boot a restored copy with a route to the internet and its `tailscaled` registers
+under **the same node key as the machine it was cloned from**. The coordination
+server treats them as one node and follows whoever reported last, so **the
+original drops off its own tailnet.** On 2026-08-09 that happened twice, and both
+times it presented as *the remote host having died* — ssh timeouts, `tailscale
+ping` no reply even via DERP, other peers failing too — while iteration8 was up
+the entire time (`up 3 days, 21:06`). Killing the clone restored the laptop
+immediately, with no tailscale restart. That intervention is the proof.
+
+In a real recovery this never arises: the original is dead, which is why you are
+restoring. It is purely a **rehearsal** hazard, and it is why
+`vm-restore-test.sh bootdisk` runs restored systems with `-netdev
+user,restrict=on` — a working NIC and DHCP lease, but no route off the host.
+
+The same shape appears one layer down with filesystem UUIDs (see `disk-plan`):
+**duplicated identity is safe only when the original is gone.**
 
 ## Bouncing between restore points
 
@@ -530,4 +563,4 @@ Three things bite when bouncing, none of them Timeshift's fault:
 | Jenni's MacBookAir6,1 | four pending items in `~/jenni-camera-todo.md`; her machine is also the last thing gating the upstream applesmc patch |
 | applesmc upstream patch | drafted and fully tested, `patches/upstream-applesmc-nand-disk.md`, not sent |
 | Wi-Fi lockups | trigger corroborated (connection bursts, ~254 sockets); the power-save experiment is confounded — see `WIFI.md` |
-| Xorg crash | `/var/crash` is now empty and the machine rebooted 2026-08-08 17:31, so the clock has started. Nothing new after the first hour — far too early to call it. `crash-report.sh` reads any new one |
+| Xorg crash | `/var/crash` is still empty, but **the observation clock was reset**: the restore and bounce testing rebooted this machine repeatedly on 2026-08-08/09, and the restores reverted `/var/log/wtmp` as well, so `last reboot` no longer even shows the earlier boots (`wtmp begins 21:08:54`). Treat the window as starting from the final boot, not 17:31. `crash-report.sh` reads any new one |
