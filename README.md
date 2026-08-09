@@ -1275,13 +1275,30 @@ laptop.
 snapshot data is local there so nothing crosses Wi-Fi, and a 4GB laptop is a poor
 VM host. `scp` it across and run it there.
 
-**How long it takes, measured across several runs: 15-25 minutes, once over 30.**
-That spread is real and not a fault. Watch the step numbers rather than the
-clock, and do not kill a run for being slow. Two things drive it: the restore
-guest is now sized generously — it builds an artefact and tests nothing, so
-laptop-sizing it bought no fidelity and cost ten minutes — and a `target.qcow2`
-recreated from empty pays qcow2 first-write allocation that a reused one does
-not.
+**How long it takes: 15–25 minutes, once over 30, and the spread is real.** Watch
+the step numbers rather than the clock, and do not kill a run for being slow.
+
+The cause was chased and is now understood, which is worth recording because two
+plausible explanations were wrong. It is **not** qcow2 first-write allocation
+(falsified by a controlled repeat), and it is **not** contention from the other
+VM on the host (its I/O counters were frozen at zero for an entire 21-minute
+run). It is write buffering: iteration8 has 251 GB of RAM and a 20%
+`vm.dirty_ratio`, so ~50 GB of dirty pages are permitted — more than the whole
+restore writes. A run starting with cache headroom absorbs almost everything and
+finishes in nine minutes; one starting with 180 GB already cached hits writeback
+throttling partway and drops to disk speed. The floor is four 7200 RPM disks and
+no SSD.
+
+**Guest sizing for the restore is unproven.** 2 cpu / 4G took 21m00; 8 cpu / 16G
+with 19 GB less written took 20m26. Twenty-six seconds. Wall-clock cannot see the
+difference while writes are being buffered, and the run-to-run variance swamps
+it. The generous sizing is kept because it costs nothing on a 32-core host, not
+because it was shown to help. Worth retrying somewhere with different storage.
+
+**`golden.qcow2` is ~22.6 GB rather than 19 GB** since sealing became a move
+rather than a convert. The convert was compacting it; the move does not. That is
+a deliberate trade — 19 GB less written on every build, ~3.6 GB more held
+permanently — on a host with 1.5 T free.
 
 **Run end to end on 2026-08-09, and it worked.** From nothing but the offsite
 copy: 499,328 files pulled and decoded, Timeshift restored onto a blank virtual

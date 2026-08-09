@@ -102,10 +102,23 @@ RSYNC_PORT="${MBA_VMTEST_RSYNC_PORT:-8730}"
 TEST_SMP="${MBA_VMTEST_TEST_SMP:-4,sockets=1,cores=2,threads=2}"
 TEST_RAM="${MBA_VMTEST_TEST_RAM:-4096}"
 
-# BUILD sizing is for the restore, which CONSTRUCTS an artefact and tests
-# nothing about the laptop. Holding it to laptop size buys no fidelity and costs
-# ten minutes -- a 741k-file rsync in a 4G guest has almost no page cache left
-# for metadata. Against a 32-core, 251G host this is still a rounding error.
+# BUILD sizing is for the restore, which CONSTRUCTS an artefact and tests nothing
+# about the laptop, so holding it to laptop size buys no fidelity.
+#
+# IT IS ALSO UNPROVEN, and that is recorded here so nobody assumes it is doing
+# work. Measured on iteration8: 2 cpu / 4G with a convert took 21m00; 8 cpu / 16G
+# with the convert replaced by a move took 20m26. Twenty-six seconds, for four
+# times the CPU and RAM plus 19G less written.
+#
+# Two reasons the measurement could not see anything. The host has 251G of RAM
+# and vm.dirty_ratio of 20%, so ~50G of dirty pages are allowed -- more than the
+# whole restore writes. Writes are absorbed and flushed after the command
+# returns, so wall-clock hides I/O cost entirely. And run-to-run variance for the
+# same phase was 9, 15 and 20 minutes, which swamps any effect this size.
+#
+# The floor here is four 7200rpm Hitachi disks and no SSD. Worth retrying on a
+# host with different storage -- the 7810, if it is ever converted to Linux --
+# before concluding that guest sizing never matters.
 BUILD_SMP="${MBA_VMTEST_BUILD_SMP:-8}"
 BUILD_RAM="${MBA_VMTEST_BUILD_RAM:-16384}"
 TARGET_GB=40
