@@ -281,6 +281,107 @@ cmd_remove_hook() {
   fi
 }
 
+# Boot a kernel ONCE, without making it the default.
+#
+# `check` proves a kernel's drivers were BUILT. That is not the same claim as
+# "this kernel works" -- dkms can report a clean build for something that will
+# not bring up the interface. A held fallback you have never booted is a belief.
+# This is how one becomes evidence, and it is safe because it is one-shot: if the
+# kernel fails, the next boot returns to the default with nothing to undo.
+#
+# WHY NUMERIC INDICES AND NOT TITLES
+#
+# `grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.17.0-42-generic"`
+# was accepted silently, written to grubenv, and CONSUMED by grub at boot -- and
+# still booted the default. Verified 2026-08-09: after that boot, grubenv held
+# `next_entry=` (empty), so grub had read and cleared it, then failed to resolve
+# the title path and fell back to entry 0. Numeric indices ("1>2") worked first
+# try. So this builds the numeric path itself rather than trusting titles.
+#
+# THE CHECK THAT ACTUALLY DIAGNOSES IT
+#
+# Reading `grub-editenv list` BEFORE rebooting proves only that grub-reboot
+# wrote the variable -- it says nothing about whether grub can resolve it. Read
+# it AFTER the boot instead:
+#
+#   empty + you booted the kernel you asked for   -> worked
+#   empty + you booted the default                -> grub consumed it and could
+#                                                    not resolve it (this bug)
+#   still set                                     -> grub never read grubenv at
+#                                                    all, a different fault
+grub_menu_path() {   # $1 = kernel version -> numeric "submenu>entry", or empty
+  local want="$1" cfg=/boot/grub/grub.cfg
+  [ -r "$cfg" ] || return 1
+  awk -v want="$want" '
+    /^[[:space:]]*submenu / { sub_i = top_i; top_i++; in_sub = 1; ent_i = 0; next }
+    # Only an UNINDENTED brace closes the submenu. Every inner menuentry ends
+    # with an indented "}" too, so matching any closing brace ends the submenu at
+    # the first entry -- which silently yields a top-level index for a nested
+    # kernel and boots the wrong thing.
+    /^}[[:space:]]*$/ { in_sub = 0; next }
+    /^[[:space:]]*menuentry / {
+      # recovery entries are a different thing; never auto-target one
+      if ($0 ~ /recovery mode/) { if (in_sub) ent_i++; else top_i++; next }
+      if (in_sub) {
+        if ($0 ~ ("Linux " want "(\\047| )")) { print sub_i ">" ent_i; exit }
+        ent_i++
+      } else {
+        if ($0 ~ ("Linux " want "(\\047| )")) { print top_i; exit }
+        top_i++
+      }
+    }
+  ' "$cfg"
+}
+
+cmd_boot_test() {
+  local want="${1:-}"
+  if [ -z "$want" ]; then
+    say "Kernels you could boot-test"
+    local k
+    for k in $(installed_kernels); do
+      [ "$k" = "$(uname -r)" ] && info "$k  (running now)" || info "$k"
+    done
+    info ""
+    info "Usage: sudo $0 boot-test <version>"
+    return 0
+  fi
+
+  [ -d "/lib/modules/$want" ] || die "$want is not installed. '$0 check' lists what is."
+  [ "$want" = "$(uname -r)" ] && die "$want is already running -- nothing to test."
+
+  # Refusing to boot-test a kernel with no wl is the entire point of this script.
+  if ! dkms_built_for broadcom-sta "$want"; then
+    bad "$want has no wl module built."
+    info "Booting it would leave this machine with no network, and Wi-Fi is the"
+    info "only interface. Fix the build first: sudo dkms autoinstall -k $want"
+    return 2
+  fi
+
+  local path; path=$(grub_menu_path "$want")
+  [ -n "$path" ] || die "could not find $want in /boot/grub/grub.cfg (need root to read it?)"
+
+  say "One-shot boot of $want"
+  info "grub menu path: $path  (numeric -- titles do not reliably resolve)"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "would run: grub-reboot \"$path\""
+    return 0
+  fi
+  [ "$(id -u)" = 0 ] || die "boot-test needs root. Try: sudo $0 boot-test $want"
+
+  grub-reboot "$path" || die "grub-reboot failed"
+  ok "armed: next boot only, then back to the default on its own"
+  info ""
+  info "  sudo reboot"
+  info ""
+  info "Afterwards, check BOTH of these -- the second is what diagnoses a miss:"
+  info "  uname -r                 want $want"
+  info "  grub-editenv list        empty next_entry = grub consumed it"
+  info ""
+  info "If you land on the default with next_entry empty, grub could not resolve"
+  info "the path. If next_entry is still set, grub never read grubenv at all."
+}
+
 usage() {
   cat <<EOF
 
@@ -293,6 +394,10 @@ kernel-guard.sh — do not let a kernel land without its drivers
                        also raise a desktop notification, for a machine whose
                        updates run through the GUI rather than a terminal
   $0 test-alarm       fire the alarm as a drill, changing nothing
+  $0 boot-test        list kernels you could boot-test
+  sudo $0 boot-test VERSION
+                       boot that kernel ONCE, then back to the default by itself.
+                       'check' proves the drivers BUILT; this proves they work.
   sudo $0 remove-hook  undo it
 
   --dry-run          show what would change, change nothing
@@ -316,6 +421,7 @@ main() {
 
   case "${args[0]:-check}" in
     test-alarm)   cmd_test_alarm ;;
+    boot-test)    cmd_boot_test "${args[1]:-}" ;;
     check)
       # --quiet-ok suppresses the ok path but never the warnings: the whole
       # point is that a problem is impossible to miss in apt's output.

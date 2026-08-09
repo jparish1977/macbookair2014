@@ -314,6 +314,11 @@ firmware times out.
 
 Stops a kernel landing quietly without its out-of-tree drivers.
 
+    ./kernel-guard.sh check                    every installed kernel and its drivers
+    ./kernel-guard.sh boot-test                kernels you could boot-test
+    sudo ./kernel-guard.sh boot-test VERSION   boot one ONCE, then back on its own
+
+
 With no apt pin, 7.x point releases arrive unattended and DKMS rebuilds `wl` and
 `facetimehd` for each one. When that build fails, DKMS does say so — in the
 middle of hundreds of lines of `apt upgrade` output, where it is trivially
@@ -677,6 +682,47 @@ Only the *trigger* needs root, and only once.
 
 Same model, same driver, same default trigger — see the pending list outside
 this repo. `kbd-backlight.sh install` is all it needs.
+
+### `boot-test`: "built" and "works" are different claims
+
+`check` proves a kernel's drivers were **built**. It cannot prove the kernel
+comes up — DKMS will report a clean build for something that never brings the
+interface online. A held fallback you have never booted is a belief, and this
+machine keeps three of them.
+
+`boot-test` boots one **once**, using GRUB's one-shot `next_entry`, so the boot
+after it returns to the default with nothing to undo. It refuses outright if the
+target has no `wl` built, since booting that is precisely the stranding this
+script exists to prevent.
+
+**It builds a numeric GRUB path rather than passing a title, and that is the
+point.** Run by hand on 2026-08-09:
+
+    grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux 6.17.0-42-generic"
+
+was accepted, written to `grubenv`, **consumed by GRUB at boot** — and still
+booted the default. `grub-reboot "1>2"` worked first try.
+
+**The check that diagnoses this is reading `grub-editenv list` *after* the boot,
+not before.** Before, it only proves `grub-reboot` wrote the variable; it says
+nothing about whether GRUB can resolve it. Afterwards:
+
+| `next_entry` | booted | meaning |
+| --- | --- | --- |
+| empty | the kernel you asked for | worked |
+| empty | the default | GRUB consumed it and could not resolve the path |
+| still set | the default | GRUB never read `grubenv` at all — a different fault |
+
+Parsing that menu has its own trap, caught by testing against a synthetic
+`grub.cfg` rather than the real one: **every inner `menuentry` closes with `}`
+too**, so treating any closing brace as the end of the submenu ends it at the
+first entry and yields a top-level index for a nested kernel — i.e. silently
+boots the wrong thing. Only an unindented brace closes a submenu.
+
+Proven end to end: `6.17.0-42` was installed alongside the held fallbacks, DKMS
+built `wl` and `facetimehd` for it, and it booted with Wi-Fi up, camera present
+and the keyboard-backlight fix intact — making it the first fallback that is
+*proven* rather than merely built.
 
 ## `apt-rollback.sh`
 
