@@ -85,8 +85,29 @@ SNAPSRC="${MBA_VMTEST_SNAPSRC:-/srv/mba-snapshots}"
 ISO_URL="${MBA_VMTEST_ISO_URL:-https://mirrors.kernel.org/linuxmint/stable/22.3/linuxmint-22.3-xfce-64bit.iso}"
 ISO="$WORK/$(basename "$ISO_URL")"
 RSYNC_PORT="${MBA_VMTEST_RSYNC_PORT:-8730}"
-VM_RAM="${MBA_VMTEST_RAM:-4096}"      # match the laptop: 4G
-VM_CPUS="${MBA_VMTEST_CPUS:-2}"       # match the laptop: 2 cores
+# The VM plays two roles and they want different sizing. One knob for both was
+# wrong in both directions at once: too small to match the laptop, too small to
+# build an image quickly.
+#
+# TEST sizing MATCHES THE LAPTOP, and has to. An i5-4260U is 1 socket, 2 cores,
+# 2 threads per core -- `nproc` reports FOUR. DKMS `make -j`, systemd
+# parallelism and initramfs compression all size themselves off that. The
+# previous `-smp 2` was half the laptop while carrying a comment claiming to
+# match it.
+#
+# qemu's emulated threads are not real SMT: each vCPU is its own host thread, so
+# guest siblings never contend for one physical core the way real HT does. What
+# topology emulation buys is that nproc-driven decisions come out the same as on
+# the metal, which is the fidelity that matters for "does it build, does it boot".
+TEST_SMP="${MBA_VMTEST_TEST_SMP:-4,sockets=1,cores=2,threads=2}"
+TEST_RAM="${MBA_VMTEST_TEST_RAM:-4096}"
+
+# BUILD sizing is for the restore, which CONSTRUCTS an artefact and tests
+# nothing about the laptop. Holding it to laptop size buys no fidelity and costs
+# ten minutes -- a 741k-file rsync in a 4G guest has almost no page cache left
+# for metadata. Against a 32-core, 251G host this is still a rounding error.
+BUILD_SMP="${MBA_VMTEST_BUILD_SMP:-8}"
+BUILD_RAM="${MBA_VMTEST_BUILD_RAM:-16384}"
 TARGET_GB=40
 CARRIER_GB=30
 
@@ -119,6 +140,9 @@ usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autolog
        $0 testbase       golden.qcow2 + a serial console -> testbase.qcow2
        $0 verify [IMG]   boot a test image and check this project's fixes took
        $0 verify-control prove those checks can fail, by breaking three on purpose
+       $0 usb-image [IMG] make a VM-approved image bootable from USB on the real
+                         machine, with every identifier rewritten so it cannot
+                         fight the internal disk
        $0 update-test [PKG...]
                          run the update the laptop is about to run, HERE first:
                          upgrade a candidate overlay, then re-check every fix
@@ -158,7 +182,10 @@ cmd_prepare() {
     echo "  fetching $(basename "$ISO") ..."
     curl -sSL -C - -o "$ISO" "$ISO_URL" || die "download failed"
   fi
-  file -b "$ISO" | grep -q ISO || die "$ISO is not an ISO image"
+  # NOT `file ... | grep -q`. See the pipefail note by guest() below: grep -q
+  # exits on the first match, the upstream dies of SIGPIPE, and pipefail turns a
+  # successful match into a failed pipeline.
+  case "$(file -b "$ISO")" in *ISO*) ;; *) die "$ISO is not an ISO image" ;; esac
   ok "ISO present ($(du -h "$ISO" | cut -f1))"
 
   qemu-img create -f qcow2 "$WORK/target.qcow2"  "${TARGET_GB}G"  >/dev/null || die
@@ -316,6 +343,10 @@ cmd_boot() {
   local disk="${1:-target.qcow2}"
   case "$disk" in /*) ;; *) disk="$WORK/$disk" ;; esac
   [ -s "$disk" ] || die "no such image: $disk"
+  # "build" for constructing an image, anything else for a run that produces a
+  # verdict. See the sizing block at the top for why these differ.
+  local smp="$TEST_SMP" ram="$TEST_RAM"
+  [ "${2:-test}" = build ] && { smp="$BUILD_SMP"; ram="$BUILD_RAM"; }
 
   local mine; mine=$(our_qemu)
   if [ -n "$mine" ] && kill -0 "$mine" 2>/dev/null; then
@@ -329,7 +360,7 @@ cmd_boot() {
   # AHCI rather than virtio so the guest sees /dev/sda like the real machine.
   # The laptop's initramfs is MODULES=most so virtio would work too, but there is
   # no reason to introduce a difference the restored system has never seen.
-  qemu-system-x86_64 -enable-kvm -cpu host -smp "$VM_CPUS" -m "$VM_RAM" \
+  qemu-system-x86_64 -enable-kvm -cpu host -smp "$smp" -m "$ram" \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$WORK/vars.fd" \
     -device ich9-ahci,id=ahci \
@@ -345,7 +376,7 @@ cmd_boot() {
   local i
   for i in $(seq 1 60); do [ -S "$WORK/serial.sock" ] && break; sleep 1; done
   [ -S "$WORK/serial.sock" ] || die "qemu never created the serial socket -- see $WORK/qemu.log"
-  ok "VM started (pid $(cat "$WORK/qemu.pid" 2>/dev/null)), live session on $(basename "$disk")"
+  ok "VM started (pid $(cat "$WORK/qemu.pid" 2>/dev/null)), live session on $(basename "$disk") [${smp%%,*} cpu, $((ram / 1024))G]"
   echo "  give it ~50s, then:  $0 sh 'id'"
 }
 
@@ -403,7 +434,9 @@ drain(1.0); s.sendall((sys.argv[2] + "\n").encode())
 sys.stdout.write(drain(4).decode("utf-8", "replace"))
 PY
 
-  qemu-system-x86_64 -enable-kvm -cpu host -smp "$VM_CPUS" -m "$VM_RAM" \
+  # Always TEST sizing. Everything booted from disk produces a verdict, and a
+  # verdict from a machine shaped differently to the laptop is worth less.
+  qemu-system-x86_64 -enable-kvm -cpu host -smp "$TEST_SMP" -m "$TEST_RAM" \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$WORK/vars.fd" \
     -device ich9-ahci,id=ahci \
@@ -617,6 +650,119 @@ guest() {
     | tr -d '\r' | sed 's/\x1b\[[0-9?;]*[a-zA-Z]//g'
 }
 
+# NEVER pipe guest() into `grep -q`, and the reason is worth the paragraph.
+#
+# grep -q exits the instant it matches. That closes the pipe, the process
+# upstream takes SIGPIPE and dies with 141 -- and under `set -o pipefail` the
+# PIPELINE then reports failure even though the match succeeded. Whether it bites
+# depends on whether the upstream had finished writing first, so it is
+# intermittent and looks like anything but what it is. It cost real time here:
+# "the guest could not fetch the update driver" on a fetch that had worked.
+#
+# guest_says captures first and matches second, so there is no pipeline to fail.
+# A HERE-STRING, not a pipe. `printf ... | grep -q` reintroduces the very bug
+# this helper exists to avoid -- which is exactly what happened on the first
+# attempt: the fetch worked, RC=0, the file was there, and this still reported
+# failure. If it is a pipeline, grep -q can SIGPIPE it.
+guest_says() {   # $1 = command, $2 = seconds, $3 = pattern
+  local out; out=$(guest "$1" "$2")
+  grep -q -- "$3" <<< "$out"
+}
+
+# Wait for a login on the serial console, then let the probe's connection close.
+#
+# Three callers each grew their own copy of this loop, which is how one settle
+# came to need adding in three places -- the reason it lives here now.
+#
+# `id` is the probe because its OUTPUT (uid=) cannot appear in the echo of the
+# command itself. A probe that greps for its own marker matches the serial echo
+# and passes before the guest is up.
+wait_for_guest() {   # $1 = where to look if it never comes up
+  local i up=0
+  for i in $(seq 1 40); do
+    guest_says "id" 4 "uid=" && { up=1; break; }
+    sleep 5
+  done
+  [ "$up" = 1 ] || die "no login on the serial console after ~3 min${1:+ -- $1}"
+  ok "guest is up"
+  # qemu's unix serial takes ONE client at a time, so the next exchange issued
+  # straight after this probe loses its first attempt to the connection still
+  # closing. Seen as a fetch that fails once and succeeds on the retry, with the
+  # daemon answering throughout -- which sends you after the daemon for an hour.
+  sleep 3
+}
+
+# Pull a driver script into the guest over the vmtest rsync module.
+#
+# The daemon is started HERE and not before the ~90s boot: it is wanted for a few
+# seconds, and a long window is one in which something can take it away.
+#
+# P''ULLED, not PULLED. The serial link echoes the command back before running
+# it, so a marker spelled plainly appears in the output whether or not the
+# command worked, and the check passes on failure. Splitting it with a quote
+# makes the echo read P''ULLED while only the shell's own output reads PULLED.
+# Make a disposable overlay.
+#
+# Always as THIS user. Building one under sudo leaves a root-owned image qemu
+# cannot open, and that surfaces three minutes later as "no login on the serial
+# console" rather than as the permissions error it is -- which cost a run.
+make_overlay() {   # $1 = backing image, $2 = overlay to create
+  [ -s "$1" ] || die "no backing image $(basename "$1")"
+  rm -f "$2"
+  qemu-img create -f qcow2 -b "$1" -F qcow2 "$2" >/dev/null \
+    || die "could not create $(basename "$2") over $(basename "$1")"
+}
+
+# Attach an image as an nbd device and wait for its partitions to appear.
+nbd_attach() {   # $1 = image, $2 = device
+  sudo modprobe nbd max_part=8 || die "cannot load the nbd module"
+  # Never inherit a connection we did not make: a stale one points at another
+  # image, and everything downstream would edit the wrong disk.
+  sudo qemu-nbd --disconnect "$2" >/dev/null 2>&1
+  sleep 1
+  sudo qemu-nbd --connect="$2" "$1" || die "qemu-nbd could not attach $(basename "$1")"
+  sleep 2
+  [ -b "${2}p2" ] || die "no partitions on $2 -- is $(basename "$1") really a restored disk?"
+}
+
+# Watch a detached in-guest job through its one-line status file.
+#
+# Both long guest drivers report identically -- STEP lines while working, a final
+# DONE:rc=N -- so they are polled identically. They were not: the two copies had
+# already drifted to different column widths, which is what duplication does
+# while you are not looking.
+#
+# Sets POLL_RC, because bash cannot return a string. Returns 1 on timeout.
+poll_guest_job() {   # $1 = status file inside the guest, $2 = timeout in seconds
+  local waited=0 last="" line
+  POLL_RC=""
+  while [ "$waited" -lt "$2" ]; do
+    sleep 20; waited=$((waited + 20))
+    line=$(guest "cat $1" 5 | grep -E '^(STEP|DONE:rc=)' | tail -1)
+    case "$line" in
+      DONE:rc=*) POLL_RC="${line#DONE:rc=}"; return 0 ;;
+      STEP*)     [ "$line" = "$last" ] || { last="$line"; info "$(printf '%4sm  ' $((waited / 60)))$line"; } ;;
+    esac
+  done
+  return 1
+}
+
+fetch_driver() {   # $1 = file in $WORK, $2 = destination in the guest
+  local try
+  for try in 1 2; do
+    cmd_serve >/dev/null 2>&1 \
+      || die "the rsync daemon is not serving a decoded tree -- see $WORK/rsyncd.log"
+    guest_says "rsync -a rsync://10.0.2.2:$RSYNC_PORT/vmtest/$1 $2 && echo P''ULLED" 20 "^PULLED" \
+      && { ok "$1 is in the guest"; return 0; }
+    [ "$try" = 2 ] && {
+      bad "the guest could not fetch $1 from the vmtest module"
+      info "daemon: $(pgrep -f "^rsync --daemon --config=$WORK" >/dev/null && echo running || echo "NOT running")"
+      die "see $WORK/rsyncd.log"
+    }
+    warn "fetch failed on the first attempt, re-serving and retrying"
+  done
+}
+
 cmd_restore() {
   cd "$WORK" || die "run '$0 prepare' first"
   local snap="${1:-}"
@@ -657,10 +803,26 @@ cmd_restore() {
     warn "golden.qcow2 already exists ($(du -h "$WORK/golden.qcow2" | cut -f1)) and will be REPLACED at the end"
   fi
 
-  # Bring up the pieces this needs. All three are idempotent.
-  [ -s "$WORK/target.qcow2" ] && [ -s "$WORK/carrier.qcow2" ] || die "no disks -- run '$0 prepare' first"
-  cmd_serve || die "the rsync daemon is not serving a decoded tree -- fix that first"
-  cmd_boot  || die "could not start the VM"
+  # Bring up the pieces this needs. All of it is idempotent.
+  #
+  # target and carrier are SCRATCH -- this wipes and rewrites both anyway -- so
+  # recreate them if a previous cleanup took them, rather than sending you to
+  # `prepare` for two empty files. A missing ISO or initrd is a different matter:
+  # that genuinely needs prepare, and saying so is useful.
+  [ -s "$WORK/initrd.new" ] || die "no patched initrd -- run '$0 prepare' first"
+  [ -s "$ISO" ]             || die "no ISO -- run '$0 prepare' first"
+  if [ ! -s "$WORK/target.qcow2" ]; then
+    qemu-img create -f qcow2 "$WORK/target.qcow2" "${TARGET_GB}G" >/dev/null || die "cannot create the target disk"
+    info "recreated target.qcow2 (${TARGET_GB}G, scratch)"
+  fi
+  if [ ! -s "$WORK/carrier.qcow2" ]; then
+    qemu-img create -f qcow2 "$WORK/carrier.qcow2" "${CARRIER_GB}G" >/dev/null || die "cannot create the carrier disk"
+    info "recreated carrier.qcow2 (${CARRIER_GB}G, scratch)"
+  fi
+  # Not served yet -- see update-test for why. The daemon is needed for a few
+  # seconds during the fetch, and starting it before a ~90s boot leaves a long
+  # window for something to take it away again.
+  cmd_boot target.qcow2 build || die "could not start the VM"
 
   # The driver, fetched by the guest over the vmtest module. Sending a multi-KB
   # script down the serial line would be at the mercy of every echo and control
@@ -787,42 +949,19 @@ echo "=== restore complete"
 GUEST
   chmod 755 "$WORK/guest-restore.sh"
 
-  # Wait for the live session. `id` is the readiness probe because its OUTPUT
-  # (uid=) cannot appear in the echo of the command itself -- a probe that greps
-  # for its own marker matches the echo and passes before the guest is up.
   say "waiting for the live session"
-  local i=0 up=0
-  while [ "$i" -lt 40 ]; do
-    guest "id" 4 | grep -q "uid=" && { up=1; break; }
-    i=$((i + 1)); sleep 5
-  done
-  [ "$up" = 1 ] || die "no live session on the serial console after ~3 min -- '$0 status', then see $WORK/qemu.log"
-  ok "live session is up"
+  local i
+  wait_for_guest "'$0 status', then see $WORK/qemu.log"
+  fetch_driver guest-restore.sh /tmp/g.sh
 
-  # P''ULLED, not PULLED, and the same trick below. The serial link echoes the
-  # command back before running it, so a marker spelled plainly appears in the
-  # output whether or not the command worked -- the check passes on failure.
-  # Splitting it with a quote makes the echo read P''ULLED and only the shell's
-  # own output read PULLED.
-  guest "rsync -a rsync://10.0.2.2:$RSYNC_PORT/vmtest/guest-restore.sh /tmp/g.sh && echo P''ULLED" 20 \
-    | grep -q "^PULLED" || die "the guest could not fetch the driver from the vmtest module"
-  ok "driver in the guest"
-
-  say "restoring $snap -- this runs for tens of minutes"
+  say "restoring $snap -- 15-25 minutes, and it has run to 30"
   info "the VM does the work; this only polls /tmp/g.status"
-  guest "sudo sh -c 'setsid /tmp/g.sh $snap $root_uuid $esp_id $RSYNC_PORT >/tmp/g.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 \
-    | grep -q "^LAUNCHED" || die "could not launch the driver in the guest"
+  guest_says "sudo sh -c 'setsid /tmp/g.sh $snap $root_uuid $esp_id $RSYNC_PORT >/tmp/g.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 "^LAUNCHED" \
+    || die "could not launch the driver in the guest"
 
-  local timeout="${MBA_VMTEST_RESTORE_TIMEOUT:-10800}"
-  local waited=0 last="" line rc=""
-  while [ "$waited" -lt "$timeout" ]; do
-    sleep 20; waited=$((waited + 20))
-    line=$(guest "cat /tmp/g.status" 5 | grep -E '^(STEP|DONE:rc=)' | tail -1)
-    case "$line" in
-      DONE:rc=*) rc="${line#DONE:rc=}"; break ;;
-      STEP*)     [ "$line" = "$last" ] || { last="$line"; info "$(printf '%5sm  ' $((waited / 60)))$line"; } ;;
-    esac
-  done
+  local timeout="${MBA_VMTEST_RESTORE_TIMEOUT:-10800}" rc=""
+  poll_guest_job /tmp/g.status "$timeout"
+  rc="$POLL_RC"
 
   if [ -z "$rc" ]; then
     bad "no verdict after $((timeout / 60)) minutes"
@@ -917,18 +1056,8 @@ cmd_testbase() {
   }
   trap 'tb_cleanup' EXIT
 
-  sudo modprobe nbd max_part=8 || die "cannot load the nbd module"
-  # Never inherit a connection we did not make -- a stale one points at another
-  # image, and everything below would edit the wrong disk.
-  sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1
-  sleep 1
-
-  rm -f "$WORK/testbase.qcow2"
-  qemu-img create -f qcow2 -b "$WORK/golden.qcow2" -F qcow2 "$WORK/testbase.qcow2" >/dev/null \
-    || die "could not create the overlay"
-  sudo qemu-nbd --connect="$dev" "$WORK/testbase.qcow2" || die "qemu-nbd could not attach the overlay"
-  sleep 2
-  [ -b "${dev}p2" ] || die "no partitions on $dev -- is golden.qcow2 really a restored disk?"
+  make_overlay "$WORK/golden.qcow2" "$WORK/testbase.qcow2"
+  nbd_attach "$WORK/testbase.qcow2" "$dev"
   sudo mount "${dev}p2" "$mnt" || die "cannot mount the restored root"
 
   sudo tee "$mnt/etc/default/grub.d/99-vmtest.cfg" >/dev/null <<'X'
@@ -1240,9 +1369,7 @@ cmd_verify() {
     # it -- journal, logs, systemd state -- so verifying the base directly leaves
     # every later overlay standing on a slightly different base each time. The
     # entire point of a base image is that it does not move.
-    rm -f "$WORK/verify-scratch.qcow2"
-    qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/verify-scratch.qcow2" >/dev/null \
-      || die "could not create the scratch overlay"
+    make_overlay "$WORK/testbase.qcow2" "$WORK/verify-scratch.qcow2"
     img="$WORK/verify-scratch.qcow2"
   else
     img="$1"
@@ -1253,19 +1380,15 @@ cmd_verify() {
   cmd_bootdisk "$(basename "$img")" >/dev/null || die "could not boot $img"
   say "booted $(basename "$img"), waiting for it to come up"
 
-  local i up=0
-  for i in $(seq 1 40); do
-    guest "id" 4 | grep -q "uid=" && { up=1; break; }
-    sleep 5
-  done
-  [ "$up" = 1 ] || die "no login on the serial console after ~3 min -- '$0 screenshot' to see why"
+  local i
+  wait_for_guest "'$0 screenshot' to see why"
 
-  guest "test -x /opt/mba-verify/guest-verify.sh && echo P''RESENT" 6 | grep -q "^PRESENT" \
+  guest_says "test -x /opt/mba-verify/guest-verify.sh && echo P''RESENT" 6 "^PRESENT" \
     || die "no verify script in the image -- rebuild it with '$0 testbase'"
 
   say "running the checks"
-  guest "setsid /opt/mba-verify/guest-verify.sh >/tmp/verify.out 2>&1 </dev/null & echo S''TARTED" 6 \
-    | grep -q "^STARTED" || die "could not start the checks in the guest"
+  guest_says "setsid /opt/mba-verify/guest-verify.sh >/tmp/verify.out 2>&1 </dev/null & echo S''TARTED" 6 "^STARTED" \
+    || die "could not start the checks in the guest"
 
   local out=""
   for i in $(seq 1 30); do
@@ -1355,9 +1478,7 @@ cmd_update_test() {
   done
   pkgs="${pkgs# }"
 
-  rm -f "$WORK/candidate.qcow2"
-  qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/candidate.qcow2" >/dev/null \
-    || die "could not create the candidate overlay"
+  make_overlay "$WORK/testbase.qcow2" "$WORK/candidate.qcow2"
   ok "candidate.qcow2 created over testbase"
 
   # The daemon is deliberately NOT started here. It is only needed for the few
@@ -1529,42 +1650,17 @@ GUEST
   chmod 755 "$WORK/guest-update.sh"
 
   say "waiting for the live session"
-  local i up=0
-  for i in $(seq 1 40); do
-    guest "id" 4 | grep -q "uid=" && { up=1; break; }
-    sleep 5
-  done
-  [ "$up" = 1 ] || die "no live session after ~3 min -- see $WORK/qemu.log"
-
-  # Serve now, with the guest already up and waiting, then fetch. One retry,
-  # because the failure mode being guarded against is the daemon going away
-  # rather than the transfer itself failing.
-  local try
-  for try in 1 2; do
-    cmd_serve >/dev/null 2>&1
-    guest "rsync -a rsync://10.0.2.2:$RSYNC_PORT/vmtest/guest-update.sh /tmp/u.sh && echo P''ULLED" 20 \
-      | grep -q "^PULLED" && break
-    [ "$try" = 2 ] && {
-      bad "the guest could not fetch the update driver"
-      info "daemon state: $(pgrep -f "^rsync --daemon --config=$WORK" >/dev/null && echo running || echo "NOT running")"
-      die "see $WORK/rsyncd.log"
-    }
-    warn "fetch failed, restarting the daemon and retrying"
-  done
+  local i
+  wait_for_guest "see $WORK/qemu.log"
+  fetch_driver guest-update.sh /tmp/u.sh
 
   say "running the upgrade the laptop would run${pkgs:+ (limited to: $pkgs)}"
-  guest "sudo sh -c 'setsid /tmp/u.sh \"$pkgs\" $unhold >/tmp/u.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 \
-    | grep -q "^LAUNCHED" || die "could not launch the update driver"
+  guest_says "sudo sh -c 'setsid /tmp/u.sh \"$pkgs\" $unhold >/tmp/u.log 2>&1 </dev/null &'; echo L''AUNCHED" 8 "^LAUNCHED" \
+    || die "could not launch the update driver"
 
-  local waited=0 last="" line rc="" timeout="${MBA_VMTEST_UPDATE_TIMEOUT:-5400}"
-  while [ "$waited" -lt "$timeout" ]; do
-    sleep 20; waited=$((waited + 20))
-    line=$(guest "cat /tmp/u.status" 5 | grep -E '^(STEP|DONE:rc=)' | tail -1)
-    case "$line" in
-      DONE:rc=*) rc="${line#DONE:rc=}"; break ;;
-      STEP*)     [ "$line" = "$last" ] || { last="$line"; info "$(printf '%4sm  ' $((waited / 60)))$line"; } ;;
-    esac
-  done
+  local rc="" timeout="${MBA_VMTEST_UPDATE_TIMEOUT:-5400}"
+  poll_guest_job /tmp/u.status "$timeout"
+  rc="$POLL_RC"
 
   if [ -z "$rc" ] || [ "$rc" != 0 ]; then
     bad "the upgrade failed in the guest${rc:+ (rc=$rc)}"
@@ -1645,6 +1741,131 @@ GUEST
   return $vrc
 }
 
+# --------------------------------------------------------------- usb-image
+
+# Turn a VM-approved image into one that can be booted on the real machine from
+# a USB disk, WITHOUT touching the internal one.
+#
+# WHY THIS IS WORTH HAVING
+#
+# The VM can prove the update installs, builds its modules and boots. It can
+# never prove Wi-Fi associates, the camera captures or the backlight lights --
+# there is no BCM4360, no FaceTime HD and no Apple SMC to emulate. Today that
+# last mile means applying the update to the only machine and rebooting.
+# Booting the approved image from USB tests the same kernel on the same hardware
+# with the internal disk untouched, and failure costs an unplug rather than a
+# rollback.
+#
+# WHY IT REWRITES EVERY IDENTIFIER, AND WHY THAT IS NOT OPTIONAL
+#
+# A raw copy keeps the original's UUIDs, and a USB disk in the same machine is
+# the definition of "a disk that coexists with the original". Two filesystems
+# sharing a UUID make blkid ambiguous and mounts non-deterministic: you can boot
+# the USB kernel and mount the INTERNAL root, or have grub resolve to the wrong
+# disk -- and then an update-grub or a kernel install writes to the internal
+# system you were trying to protect. So:
+#
+#   root      a fresh filesystem UUID (tune2fs -U), fstab and grub.cfg follow
+#   GPT       fresh disk and partition GUIDs (sgdisk -G)
+#   ESP       fstab switches to PARTUUID=, because changing a FAT volume id in
+#             place needs mtools, which is not installed -- and a duplicated ESP
+#             id is not harmless: it is how a kernel install ends up writing to
+#             the internal ESP
+#
+# It also strips the VM-only bits (99-vmtest.cfg, the serial autologin), so what
+# boots is a normal laptop with the update applied rather than a test rig.
+cmd_usb_image() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  local src="${1:-candidate.qcow2}"
+  case "$src" in /*) ;; *) src="$WORK/$src" ;; esac
+  [ -s "$src" ] || die "no such image: $src -- run '$0 update-test' first"
+  command -v sgdisk >/dev/null || die "sgdisk missing (apt install gdisk)"
+  sudo -n true 2>/dev/null || die "this needs root for nbd, mount and chroot"
+
+  local out="$WORK/usb-$(basename "${src%.qcow2}").qcow2"
+  local dev="${MBA_VMTEST_NBD:-/dev/nbd0}" mnt="$WORK/usb-mnt"
+  mkdir -p "$mnt"
+
+  usb_cleanup() {
+    sudo umount "$mnt/boot/efi" 2>/dev/null
+    local m; for m in sys proc dev/pts dev; do sudo umount "$mnt/$m" 2>/dev/null; done
+    sudo umount "$mnt" 2>/dev/null
+    sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1
+  }
+  trap 'usb_cleanup' EXIT
+
+  say "Building a standalone copy of $(basename "$src")"
+  info "A full copy, not an overlay -- it has to stand alone once written out."
+  rm -f "$out"
+  qemu-img convert -O qcow2 "$src" "$out" || die "qemu-img convert failed"
+  ok "$(basename "$out") written ($(du -h "$out" | cut -f1))"
+
+  nbd_attach "$out" "$dev"
+
+  say "Giving it identifiers of its own"
+  sudo sgdisk -G "$dev" >/dev/null || die "sgdisk could not regenerate the GPT GUIDs"
+  sudo partprobe "$dev" 2>/dev/null; sudo udevadm settle 2>/dev/null; sleep 2
+
+  local newroot; newroot=$(uuidgen)
+  sudo e2fsck -fy "${dev}p2" >/dev/null 2>&1   # tune2fs -U refuses on an unchecked fs
+  sudo tune2fs -U "$newroot" "${dev}p2" >/dev/null || die "could not set a new root UUID"
+  local esp_partuuid; esp_partuuid=$(sudo blkid -o value -s PARTUUID "${dev}p1")
+  [ -n "$esp_partuuid" ] || die "could not read the ESP's PARTUUID"
+  info "root UUID  $newroot"
+  info "ESP        PARTUUID=$esp_partuuid"
+
+  sudo mount "${dev}p2" "$mnt" || die "cannot mount the copy's root"
+
+  # fstab has to agree, or it boots to an emergency shell having found nothing.
+  sudo sed -i "s|^UUID=[0-9a-fA-F-]\{36\}\([[:space:]]\+/[[:space:]]\)|UUID=$newroot\1|" "$mnt/etc/fstab"
+  sudo sed -i "s|^UUID=[0-9A-Fa-f]\{4\}-[0-9A-Fa-f]\{4\}\([[:space:]]\+/boot/efi\)|PARTUUID=$esp_partuuid\1|" "$mnt/etc/fstab"
+
+  # Strip the rig. What boots should be a laptop with the update applied, not a
+  # test image: console=ttyS0 on a machine with no serial port is at best noise,
+  # and a root autologin on it is not something to carry onto real hardware.
+  sudo rm -f "$mnt/etc/default/grub.d/99-vmtest.cfg"
+  sudo rm -rf "$mnt/etc/systemd/system/serial-getty@ttyS0.service.d"
+  sudo rm -f "$mnt/opt/mba-verify/guest-verify.sh"
+
+  local m
+  for m in dev dev/pts proc sys; do sudo mount --bind "/$m" "$mnt/$m" || die "bind /$m failed"; done
+  sudo mount "${dev}p1" "$mnt/boot/efi" || die "cannot mount the copy's ESP"
+  sudo chroot "$mnt" update-grub 2>&1 | sed 's/^/    /'
+
+  # Verify rather than hope: the new UUID must be in grub.cfg and the old one
+  # must not, or this disk will still reach for the internal root.
+  local n_new n_old
+  n_new=$(sudo grep -c "$newroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
+  n_old=$(sudo grep -c "b96739a5-34c1-403b-b440-80df9aa71a03" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
+  [ "$n_new" -gt 0 ] || die "grub.cfg does not reference the new root UUID"
+  if [ "$n_old" -gt 0 ]; then
+    bad "grub.cfg still references the ORIGINAL root UUID in $n_old place(s)"
+    die "this disk would fight the internal one -- refusing to call it ready"
+  fi
+  ok "grub.cfg points at the new root only ($n_new references)"
+  sudo grep -E "^(UUID|PARTUUID)" "$mnt/etc/fstab" | sed 's/^/    /'
+
+  usb_cleanup
+  trap - EXIT
+
+  echo
+  ok "$(basename "$out") is ready and shares no identifier with the laptop"
+  echo
+  info "Write it to a USB disk -- ON THE MACHINE THE USB IS PLUGGED INTO, and"
+  info "check the device name twice. This overwrites whatever is on it:"
+  echo
+  echo "    lsblk -o NAME,SIZE,TRAN,MODEL          # find it. TRAN must say usb"
+  echo "    sudo qemu-img convert -O raw $out /dev/sdX"
+  echo "    sync"
+  echo
+  info "Then on the laptop: hold Option at the chime and pick the USB disk."
+  info "The internal disk is untouched -- if it misbehaves, unplug and reboot."
+  echo
+  info "This is the ONLY way to test what a VM cannot: Wi-Fi associating, the"
+  info "camera capturing, sound, and the backlight actually lighting."
+  echo
+}
+
 # ------------------------------------------------------------- verify-control
 
 # Prove the checks can FAIL. Without this, "14 passed" is not evidence.
@@ -1685,17 +1906,8 @@ cmd_verify_control() {
   trap 'ctl_cleanup' EXIT
 
   cmd_stop >/dev/null 2>&1
-  sudo modprobe nbd max_part=8 || die "cannot load the nbd module"
-  sudo qemu-nbd --disconnect "$dev" >/dev/null 2>&1; sleep 1
-
-  rm -f "$WORK/control.qcow2"
-  # Created as THIS user, deliberately. Building it under sudo leaves a
-  # root-owned image that qemu cannot open, and the failure surfaces three
-  # minutes later as "no login on the serial console".
-  qemu-img create -f qcow2 -b "$WORK/testbase.qcow2" -F qcow2 "$WORK/control.qcow2" >/dev/null \
-    || die "could not create the control overlay"
-  sudo qemu-nbd --connect="$dev" "$WORK/control.qcow2" || die "qemu-nbd could not attach the control"
-  sleep 2
+  make_overlay "$WORK/testbase.qcow2" "$WORK/control.qcow2"
+  nbd_attach "$WORK/control.qcow2" "$dev"
   sudo mount "${dev}p2" "$mnt" || die "cannot mount the control image"
 
   local f
@@ -1787,12 +1999,13 @@ cmd_clean() {
 case "${1:-status}" in
   prepare) cmd_prepare ;;
   serve)   cmd_serve ;;
-  boot)    cmd_boot "${2:-}" ;;
+  boot)    cmd_boot "${2:-}" "${3:-}" ;;
   restore) cmd_restore "${2:-}" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
   testbase)   cmd_testbase ;;
   verify)     cmd_verify "${2:-}" ;;
   verify-control) cmd_verify_control ;;
+  usb-image)  cmd_usb_image "${2:-}" ;;
   update-test) shift 2>/dev/null; cmd_update_test "$@" ;;
   bootdisk)   cmd_bootdisk "${2:-}" ;;
   screenshot) cmd_screenshot "${2:-}" ;;
