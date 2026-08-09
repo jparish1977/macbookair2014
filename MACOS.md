@@ -142,6 +142,74 @@ The 128 GB drive is the binding constraint on this machine and *is* upgradeable:
 an M.2 NVMe plus a Sintech-style adapter works on `MacBookAir6,x` despite the
 proprietary connector. Relevant to Linux regardless of macOS.
 
+## Open idea: a bootable macOS USB, if the fleet happens
+
+Noted 2026-08-09, not started. It came out of building `vm-restore-test.sh
+usb-image`, which writes a VM-approved *Linux* image to a USB disk so the last
+mile — Wi-Fi associating, the camera capturing, the backlight lighting — can be
+tested on real hardware without touching the internal disk.
+
+**Almost none of that machinery transfers, and it is worth writing down why so
+nobody tries.** Those images are GPT + ext4 and macOS install media is
+HFS+/APFS with an Apple-specific boot path; there is no converting one into the
+other. What transfers is only the cheap part: a Mac boots from USB with Option
+held.
+
+What it would actually need:
+
+- **`Install macOS Big Sur.app`** — 11.7.10 is Apple's last for this model, per
+  the table above.
+- **`createinstallmedia`, which runs only on macOS.** So it needs a working Mac
+  to build the media. The Linux route (`dmg2img` plus HFS+ tooling) exists and
+  is fiddly enough to get subtly wrong.
+- **A source.** This machine has no macOS partition and no Recovery partition
+  left — the drive is Linux end to end — so there is nothing local to build from.
+
+**It is not needed for the camera.** `mba-webcam.sh` downloads the `facetimehd`
+blob directly (2.8 MB) rather than extracting it from a macOS install, so that
+problem is already solved and is not a reason to do this.
+
+### Automating it — and the shortcut that might delete the whole job
+
+Asked 2026-08-09: could rebuilding the recovery partition and the rest be
+automated? Two things reframe it.
+
+**On Big Sur there is no separate Recovery partition to rebuild.** It is a volume
+inside the APFS container, and the installer creates the whole layout — System
+(a sealed signed snapshot), Data, Preboot, Recovery, VM — in one pass. So the
+task is not "rebuild Recovery", it is "run the installer non-interactively":
+
+    startosinstall --eraseinstall --agreetolicense --nointeraction \
+      --newvolumename "Macintosh HD"
+
+That much is scriptable and can live on the installer USB. What cannot be
+automated away is the start — someone holds Option and picks the disk. For a
+refurb line that is about a minute of attention per machine, then 30-60 minutes
+unattended. Fully hands-off imaging needs DEP/MDM enrolment, which second-hand
+machines will not have.
+
+**Do not depend on Internet Recovery, even if it works.** Joe's point, and it is
+the right instinct: the early-internet promise of everything being available for
+ever was a lie, and drivers and installers evaporate. Apple retiring recovery
+images for a 2014 model is exactly the kind of withdrawal you discover on the day
+you need it. Test it, because the test is free -- but treat capturing the
+installer while it is still served as the actual task, not as a fallback.
+
+**Test Internet Recovery anyway, because it is free and may save the effort.**
+Command-Option-R boots Apple's recovery over the network — the firmware drives
+the Wi-Fi itself, no OS involved — and reinstalls the latest macOS this model
+supports, with no media to build at all. If it still works for `MacBookAir6,1`,
+the entire "build a macOS USB" project reduces to a keyboard shortcut. It is slow
+over Wi-Fi and depends on Apple continuing to serve these models, so it wants
+confirming on one machine **before** any effort goes into building media.
+
+**Where it would pay is refurbishment, not this project.** Joe paid $20 for this
+machine and may be able to get around a hundred more (uncertain as of
+2026-08-09). A $20 Air with macOS on it is worth more than a bare one, so a
+repeatable macOS-restore USB would be an *imaging* tool for a fleet. That is a
+different shape of job from update pre-flight and wants its own scripts rather
+than bending the ones in this repo.
+
 ## Sources
 
 - [OCLP supported models](https://dortania.github.io/OpenCore-Legacy-Patcher/MODELS.html)

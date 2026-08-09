@@ -1275,6 +1275,14 @@ laptop.
 snapshot data is local there so nothing crosses Wi-Fi, and a 4GB laptop is a poor
 VM host. `scp` it across and run it there.
 
+**How long it takes, measured across several runs: 15-25 minutes, once over 30.**
+That spread is real and not a fault. Watch the step numbers rather than the
+clock, and do not kill a run for being slow. Two things drive it: the restore
+guest is now sized generously — it builds an artefact and tests nothing, so
+laptop-sizing it bought no fidelity and cost ten minutes — and a `target.qcow2`
+recreated from empty pays qcow2 first-write allocation that a reused one does
+not.
+
 **Run end to end on 2026-08-09, and it worked.** From nothing but the offsite
 copy: 499,328 files pulled and decoded, Timeshift restored onto a blank virtual
 disk, GRUB installed to a fresh ESP, and the VM booted UEFI off that disk to the
