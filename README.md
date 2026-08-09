@@ -1107,6 +1107,68 @@ laptop.
 snapshot data is local there so nothing crosses Wi-Fi, and a 4GB laptop is a poor
 VM host. `scp` it across and run it there.
 
+**Run end to end on 2026-08-09, and it worked.** From nothing but the offsite
+copy: 499,328 files pulled and decoded, Timeshift restored onto a blank virtual
+disk, GRUB installed to a fresh ESP, and the VM booted UEFI off that disk to the
+LightDM greeter — hostname `joe-MacBookAir`, user `Joe`, the right theme.
+
+    pull      499,328 files, 19.02G, speedup 1.92 (hardlinks preserved)
+    metadata  sudo -rwsr-xr-x 0:0 · shadow 0:640 0:42 · X11 a real symlink again
+    restore   completed, exit 0; fsck clean, 741,886 files
+    boot      LightDM greeter, "joe-MacBookAir"
+
+The greeter offers `Joe` but `/home/joe` is empty, which is correct: these
+snapshots are system-only. This restores *the machine*, not your files — those
+live in the separate `~/backups/mba-home/` copy.
+
+### The clone fights the original for its identity
+
+**This is the most important thing the rehearsal found, and it cost an hour of
+diagnosing the wrong machine.**
+
+A restored snapshot is not a copy of your system, it is a **second instance of
+its identity**. Machine identity lives on the system side and therefore comes
+back with the restore: `/var/lib/tailscale/tailscaled.state` (the tailnet **node
+key**), `/etc/machine-id`, `/var/lib/dbus/machine-id`, the SSH host keys.
+
+Boot that clone with a route to the internet and its `tailscaled` registers using
+the **same node key as the laptop it was cloned from**. The coordination server
+treats them as one node and follows whoever reported last, so **the original gets
+knocked off its own tailnet.** It presents exactly like the remote host having
+died: ssh times out, `tailscale ping` gets no reply, other peers fail too. It
+happened twice here and both times the conclusion looked obvious and was wrong —
+iteration8 was up the whole time, `up 3 days, 21:06`.
+
+Killing the clone restored the laptop **instantly**, with no tailscale restart.
+That is the proof: intervention on the clone fixed the original.
+
+In a genuine recovery this never arises — the original is dead, which is why
+you are restoring. It arises only in rehearsal, where both are alive. So
+`bootdisk` runs the restored system with `-netdev user,restrict=on`: a working
+NIC and DHCP lease, but no route off the host. **Never give a restored clone real
+network access while the original is running.** A test that sabotages the machine
+it is testing for is worse than no test.
+
+### Timeshift maps mount points from the snapshot's own fstab
+
+Restoring to a blank disk aborted with `Data will be modified on: <empty>` and
+**no error message** — just an immediate exit after the confirmation prompt.
+`--target` does not populate that mapping. Timeshift builds it from the
+**snapshot's `/etc/fstab`**, matched by UUID, and on a fresh disk nothing matches
+and `/boot/efi` has no candidate at all.
+
+The log shows it does ask — `Select '/boot/efi' device (default = /dev/sda1):` —
+so the real fix is to **answer those prompts with device names**. Giving the new
+disk the original UUIDs (`mkfs.ext4 -U …`, `mkfs.vfat -i 1AE41280`) works by
+supplying the default, but that only works if you know the old UUIDs, which are
+readable only from the snapshot's own fstab. Answering explicitly works on any
+replacement disk.
+
+Driving those prompts needs `expect`, not `yes`. The sequence is `Press ENTER`,
+then two `(y/n)` — so `yes` answers half of them wrongly and `yes ""` answers the
+other half wrongly. (`debconf-set-selections` is the tool for *apt* prompts;
+Timeshift rolls its own stdin loop and debconf has nothing to do with it.)
+
 Three things had to be solved to make it headless and scriptable, and each one is
 the kind of thing that is miserable to rediscover:
 

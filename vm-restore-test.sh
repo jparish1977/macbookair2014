@@ -41,6 +41,34 @@
 # also write a serial-getty autologin drop-in, and repacks it. That is the single
 # non-obvious step this whole script exists to remember.
 #
+# A RESTORED CLONE IS NOT A COPY OF YOUR SYSTEM. IT IS A SECOND INSTANCE OF ITS
+# IDENTITY -- AND IT WILL FIGHT THE ORIGINAL FOR IT.
+#
+# This cost an hour of misdiagnosis on 2026-08-09, twice, and it is the single
+# most important thing this script knows.
+#
+# The snapshot contains the system side, and machine identity lives there:
+#
+#     /var/lib/tailscale/tailscaled.state    the tailnet NODE KEY
+#     /etc/machine-id, /var/lib/dbus/machine-id
+#     /etc/ssh/ssh_host_*_key                the host's ssh identity
+#
+# Boot the restored clone with a route to the internet and its tailscaled starts
+# up and registers with the SAME node key as the machine it was cloned from. The
+# coordination server treats them as one node and follows whoever reported last,
+# so the ORIGINAL LAPTOP GETS KNOCKED OFF ITS OWN TAILNET. It presents as a dead
+# peer -- ssh times out, tailscale ping gets no reply, other peers fail too --
+# which reads exactly like the remote host having crashed. It has not. Killing
+# the clone restores the original immediately, with no tailscale restart needed.
+#
+# In a genuine recovery this does not arise: the original is dead, which is why
+# you are restoring. It arises in REHEARSAL, where both are alive at once. A test
+# that sabotages the machine it is testing for is worse than no test.
+#
+# Hence `bootdisk` runs the restored system with `-netdev user,restrict=on`: the
+# guest gets a working NIC and DHCP but no route off the host. Never give a
+# restored clone real network access while the original is running.
+#
 # HOW THE SNAPSHOT TREE REACHES THE GUEST
 #
 # Not over ssh, and not by sharing a directory. A --fake-super archive can only
@@ -86,6 +114,8 @@ usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autolog
        $0 serve          start the loopback rsync daemon that decodes --fake-super
        $0 boot           launch the VM headless, serial on a unix socket
        $0 sh "COMMAND"   run a command in the guest and print what it says
+       $0 bootdisk       boot the RESTORED system off the disk (network restricted)
+       $0 screenshot     capture the guest's framebuffer (it has no serial console)
        $0 steps          the in-guest restore procedure
        $0 status         what exists and what is running
        $0 stop           stop OUR vm and daemon (never touches other VMs)
@@ -278,6 +308,78 @@ cmd_boot() {
   echo "  give it ~50s, then:  $0 sh 'id'"
 }
 
+# Boot the RESTORED system off the target disk -- no ISO, no -kernel, so the
+# firmware has to find the bootloader itself. That is the whole question.
+#
+# restrict=on is not optional. See the identity warning in the header: with a
+# route to the internet this clone will claim the original's tailnet node key and
+# knock it offline. restrict=on still gives the guest a NIC and a DHCP lease, so
+# the system boots normally and you can see whether networking came up -- it just
+# cannot reach anything beyond the emulated network.
+#
+# The restored system's grub.cfg came from a laptop that boots to a screen, so it
+# has no console=ttyS0 and the serial port stays SILENT. That is expected, not a
+# failure. Use `screenshot` to see the console.
+cmd_bootdisk() {
+  cd "$WORK" || die "run '$0 prepare' first"
+  [ -s "$WORK/target.qcow2" ] || die "no target disk -- has a restore been done?"
+
+  local mine; mine=$(our_qemu)
+  [ -n "$mine" ] && kill -0 "$mine" 2>/dev/null && { kill "$mine"; sleep 3; }
+  rm -f "$WORK/serial.sock" "$WORK/mon.sock"
+
+  cat > "$WORK/mon.py" <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(sys.argv[1]); s.settimeout(0.5)
+def drain(sec):
+    out, end = b"", time.time() + sec
+    while time.time() < end:
+        try:
+            d = s.recv(65536)
+            if not d: break
+            out += d
+        except socket.timeout: pass
+    return out
+drain(1.0); s.sendall((sys.argv[2] + "\n").encode())
+sys.stdout.write(drain(4).decode("utf-8", "replace"))
+PY
+
+  qemu-system-x86_64 -enable-kvm -cpu host -smp "$VM_CPUS" -m "$VM_RAM" \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file="$WORK/vars.fd" \
+    -device ich9-ahci,id=ahci \
+    -drive file="$WORK/target.qcow2",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
+    -netdev user,id=n0,restrict=on -device e1000,netdev=n0 \
+    -serial "unix:$WORK/serial.sock,server,nowait" -display none \
+    -monitor "unix:$WORK/mon.sock,server,nowait" -pidfile "$WORK/qemu.pid" \
+    > "$WORK/qemu-disk.log" 2>&1 &
+
+  local i
+  for i in $(seq 1 40); do [ -S "$WORK/mon.sock" ] && break; sleep 1; done
+  [ -S "$WORK/mon.sock" ] || die "qemu did not start -- see $WORK/qemu-disk.log"
+  ok "booting the RESTORED system from disk, pid $(cat "$WORK/qemu.pid" 2>/dev/null)"
+  info "network is restricted: the clone cannot reach your tailnet"
+  echo "  give it ~90s, then:  $0 screenshot"
+}
+
+# The restored system has no serial console, so the framebuffer is the only way
+# to see what it is doing.
+cmd_screenshot() {
+  [ -S "$WORK/mon.sock" ] || die "no monitor socket -- is the VM running? '$0 status'"
+  local out="${1:-$WORK/screen.ppm}"
+  python3 "$WORK/mon.py" "$WORK/mon.sock" "screendump $out" >/dev/null 2>&1
+  sleep 1
+  [ -s "$out" ] || die "screendump produced nothing"
+  # PPM is inconvenient to look at remotely; convert if anything here can.
+  if command -v pnmtopng >/dev/null 2>&1; then
+    pnmtopng "$out" > "${out%.ppm}.png" 2>/dev/null && out="${out%.ppm}.png"
+  elif command -v convert >/dev/null 2>&1; then
+    convert "$out" "${out%.ppm}.png" 2>/dev/null && out="${out%.ppm}.png"
+  fi
+  ok "screenshot: $out ($(du -h "$out" | cut -f1))"
+  echo "  fetch it with:  scp $(hostname):$out ."
+}
+
 cmd_sh() {
   local c="${1:-}"
   [ -n "$c" ] || die "usage: $0 sh \"COMMAND\""
@@ -382,7 +484,9 @@ case "${1:-status}" in
   prepare) cmd_prepare ;;
   serve)   cmd_serve ;;
   boot)    cmd_boot ;;
-  sh)      cmd_sh "${2:-}" "${3:-8}" ;;
+  sh)         cmd_sh "${2:-}" "${3:-8}" ;;
+  bootdisk)   cmd_bootdisk ;;
+  screenshot) cmd_screenshot "${2:-}" ;;
   steps)   cmd_steps ;;
   status)  cmd_status ;;
   stop)    cmd_stop ;;

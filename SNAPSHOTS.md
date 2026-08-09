@@ -176,6 +176,15 @@ Step 1 and 2 below are done; step 3 is still optional and still not done.
    on a full dry-run comparison, and the `user.rsync.%stat` xattr confirmed on
    `/etc/shadow` inside the remote copy.
 
+   **The full disaster path is rehearsed and works (2026-08-09).** From nothing
+   but the offsite copy, in a VM on iteration8: 499,328 files pulled and decoded,
+   Timeshift restored onto a blank virtual disk, GRUB installed to a fresh ESP,
+   and it booted UEFI to the LightDM greeter as `joe-MacBookAir`. See
+   `vm-restore-test.sh` and the README for the two findings that came out of it —
+   **a restored clone fights the original for its tailnet identity**, and
+   **Timeshift maps mount points from the snapshot's own fstab**, aborting with
+   an empty table and no error on a disk whose UUIDs do not match.
+
    The trap is on the way back: **pulling the tree home also needs
    `--fake-super`, named on the remote side.** Omit it and rsync cheerfully
    hands you a tree owned by your own user with every mode wrong, which looks
