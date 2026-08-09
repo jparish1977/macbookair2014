@@ -135,8 +135,10 @@ usage() {
 usage: $0 prepare        fetch the ISO, make disks, patch the initrd for autologin
        $0 serve          start the loopback rsync daemon that decodes --fake-super
        $0 boot           launch the VM headless, serial on a unix socket
-       $0 restore [SNAP] do the whole restore unattended, ending in golden.qcow2
-                         (defaults to the newest snapshot)
+       $0 restore [SNAP] [--force]
+                         do the whole restore unattended, ending in golden.qcow2
+                         (newest snapshot by default; skipped entirely when
+                         golden is already built from it -- --force overrides)
        $0 testbase       golden.qcow2 + a serial console -> testbase.qcow2
        $0 verify [IMG]   boot a test image and check this project's fixes took
        $0 verify-control prove those checks can fail, by breaking three on purpose
@@ -765,10 +767,31 @@ fetch_driver() {   # $1 = file in $WORK, $2 = destination in the guest
 
 cmd_restore() {
   cd "$WORK" || die "run '$0 prepare' first"
-  local snap="${1:-}"
+  local snap="" force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --force) force=1 ;;
+      *)       snap="$a" ;;
+    esac
+  done
   [ -n "$snap" ] || snap=$(ls -1 "$SNAPSRC" 2>/dev/null | sort | tail -1)
   [ -n "$snap" ] || die "no snapshots in $SNAPSRC"
   [ -d "$SNAPSRC/$snap" ] || die "no such snapshot: $snap"
+
+  # Rebuild only when there is something new to rebuild FROM.
+  #
+  # golden.qcow2 is a 19G read-only base that everything downstream overlays in
+  # megabyte increments. Reproducing it from an unchanged snapshot costs ~40G of
+  # writes and twenty minutes on a spinning disk to produce a byte-identical
+  # image. The test is exact -- "built from this snapshot" -- rather than a
+  # judgement about whether it is fresh enough.
+  if [ "$force" = 0 ] && [ -s "$WORK/golden.qcow2" ] \
+     && [ "$(cat "$WORK/golden.snapshot" 2>/dev/null)" = "$snap" ]; then
+    ok "golden.qcow2 is already built from $snap -- nothing to rebuild"
+    info "$(du -h "$WORK/golden.qcow2" | cut -f1), sealed $(date -r "$WORK/golden.qcow2" '+%Y-%m-%d %H:%M')"
+    info "Rebuild it anyway with:  $0 restore --force"
+    return 0
+  fi
 
   local fstab="$SNAPSRC/$snap/localhost/etc/fstab"
   [ -r "$fstab" ] || die "cannot read the snapshot's fstab at $fstab"
@@ -977,10 +1000,13 @@ GUEST
   fi
   ok "restore verified inside the guest"
 
-  # Freeze it. `convert` rather than `cp` because it drops the qcow2 slack a 40G
-  # disk accumulates, and because the copy is read afterwards -- a truncated one
-  # would be found now rather than at the next boot test.
-  say "freezing golden.qcow2"
+  # Seal it with a MOVE, not a convert.
+  #
+  # target.qcow2 is already the finished article. Converting it read 19G and
+  # wrote another 19G to gain a compaction nothing needs -- a third of this
+  # command's entire I/O, on a 7200rpm disk, for no benefit. target is scratch
+  # and gets recreated on the next run.
+  say "sealing golden.qcow2"
   # Capture the pid BEFORE stopping: cmd_stop removes the pidfile, so asking
   # afterwards gets nothing back and there is nothing left to wait on.
   local qpid; qpid=$(our_qemu)
@@ -997,9 +1023,17 @@ GUEST
     die "qemu (pid $qpid) will not exit -- refusing to copy an image it still holds"
   fi
   rm -f "$WORK/golden.qcow2"
-  qemu-img convert -O qcow2 "$WORK/target.qcow2" "$WORK/golden.qcow2" || die "qemu-img convert failed"
-  qemu-img check "$WORK/golden.qcow2" >/dev/null 2>&1 || die "golden.qcow2 does not check out"
-  ok "golden.qcow2 written ($(du -h "$WORK/golden.qcow2" | cut -f1)), from $snap"
+  mv "$WORK/target.qcow2" "$WORK/golden.qcow2" || die "could not move the restored disk into place"
+  if ! qemu-img check "$WORK/golden.qcow2" >/dev/null 2>&1; then
+    warn "qemu-img check complained -- trying to repair leaked clusters"
+    qemu-img check -r leaks "$WORK/golden.qcow2" >/dev/null 2>&1
+    qemu-img check "$WORK/golden.qcow2" >/dev/null 2>&1 \
+      || die "golden.qcow2 does not check out even after a repair pass"
+  fi
+  # Which snapshot this was built from, so the next run can tell whether there is
+  # anything new to do. Written LAST: a partial restore must not look complete.
+  echo "$snap" > "$WORK/golden.snapshot"
+  ok "golden.qcow2 sealed ($(du -h "$WORK/golden.qcow2" | cut -f1)), from $snap"
 
   echo
   info "Boot it to confirm the whole path end to end:"
@@ -1953,6 +1987,7 @@ cmd_status() {
   echo
   [ -d "$WORK" ] || { info "not prepared yet"; echo; return 0; }
   local f
+  [ -s "$WORK/golden.snapshot" ] && printf '  %-28s %s\n' "golden built from" "$(cat "$WORK/golden.snapshot")"
   for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2 golden.qcow2 testbase.qcow2; do
     [ -e "$WORK/$f" ] && printf '  %-28s %s\n' "$f" "$(du -h "$WORK/$f" | cut -f1)" \
                       || printf '  %-28s %s\n' "$f" "missing"
@@ -2000,7 +2035,7 @@ case "${1:-status}" in
   prepare) cmd_prepare ;;
   serve)   cmd_serve ;;
   boot)    cmd_boot "${2:-}" "${3:-}" ;;
-  restore) cmd_restore "${2:-}" ;;
+  restore) shift 2>/dev/null; cmd_restore "$@" ;;
   sh)         cmd_sh "${2:-}" "${3:-8}" ;;
   testbase)   cmd_testbase ;;
   verify)     cmd_verify "${2:-}" ;;
