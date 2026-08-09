@@ -728,7 +728,7 @@ snapshot, for when something broke and you do not know what changed.
     ./system-snapshot.sh list                what exists (instant)
     ./system-snapshot.sh list --sizes        ... with real sizes (slow — see below)
     sudo ./system-snapshot.sh prune [N]      keep the newest N (default 3)
-    sudo ./system-snapshot.sh delete NAME    delete one snapshot by name
+    sudo ./system-snapshot.sh delete NAME    delete one snapshot (name or its reason)
     sudo ./system-snapshot.sh check-esp      what a restore would do to the ESP
     ./system-snapshot.sh restore-help        the procedure, and the local traps
 
@@ -1146,6 +1146,8 @@ laptop.
     ./vm-restore-test.sh serve        rsync daemon that decodes --fake-super
     ./vm-restore-test.sh boot         launch the VM headless, serial on a socket
     ./vm-restore-test.sh sh "CMD"     run a command in the guest
+    ./vm-restore-test.sh bootdisk     boot the RESTORED system (network restricted)
+    ./vm-restore-test.sh screenshot   capture its framebuffer -- it has no serial console
     ./vm-restore-test.sh steps        the in-guest restore procedure
     ./vm-restore-test.sh status       what exists, what is running
     ./vm-restore-test.sh stop|clean   teardown that never touches other VMs
