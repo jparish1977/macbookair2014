@@ -1158,11 +1158,29 @@ Restoring to a blank disk aborted with `Data will be modified on: <empty>` and
 and `/boot/efi` has no candidate at all.
 
 The log shows it does ask — `Select '/boot/efi' device (default = /dev/sda1):` —
-so the real fix is to **answer those prompts with device names**. Giving the new
-disk the original UUIDs (`mkfs.ext4 -U …`, `mkfs.vfat -i 1AE41280`) works by
-supplying the default, but that only works if you know the old UUIDs, which are
-readable only from the snapshot's own fstab. Answering explicitly works on any
-replacement disk.
+so one fix is to **answer those prompts with device names**, which works on any
+replacement disk and needs nothing known in advance.
+
+The other is to **give the new disk the original UUIDs**, and it earns its keep
+for two reasons. `fstab` is not the only place UUIDs appear — `crypttab`, the
+hibernation resume device and anything hand-written in `/etc` carry them too, and
+while Timeshift runs `update-grub` nothing sweeps the rest. Match them and every
+reference is correct by construction. It is also the only way to make recovery
+**unattended**, since the prompts then have correct defaults.
+
+Those UUIDs exist nowhere but the snapshot once the disk is gone, so
+`snapshot-offsite.sh disk-plan` reads them out of its fstab and prints the exact
+commands:
+
+    sudo mkfs.ext4 -U b96739a5-34c1-403b-b440-80df9aa71a03 /dev/sdXN   # /
+    sudo mkfs.vfat -F32 -i 1AE41280 /dev/sdXN                          # /boot/efi
+
+**Never do this to a disk that will sit alongside the original.** Two filesystems
+with one UUID make `blkid` ambiguous and mounts non-deterministic — you can boot
+the wrong disk. Replacement in a dead machine: fine. Spare in a live one: no.
+It is the same hazard as a restored clone stealing the original's tailnet
+identity, one layer further down — **duplicated identity is safe only when the
+original is gone.**
 
 Driving those prompts needs `expect`, not `yes`. The sequence is `Press ENTER`,
 then two `(y/n)` — so `yes` answers half of them wrongly and `yes ""` answers the

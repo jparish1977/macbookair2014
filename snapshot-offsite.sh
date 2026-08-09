@@ -117,6 +117,7 @@ usage: $0 status                what exists both ends, and whether a push can wo
        $0 verify                compare both ends without transferring anything (root)
        $0 watch [SECONDS]       readable progress for a push running elsewhere
        $0 pull-test [DIR]       prove the copy restores: pull probes back (root)
+       $0 disk-plan [SNAP]      the mkfs commands that recreate the ORIGINAL UUIDs
        $0 restore-help          how to get the tree back, and the trap on the way
 
 This is DISASTER RECOVERY -- for a dead disk. For rolling back a bad update use
@@ -568,6 +569,103 @@ cmd_pull_test() {
   return "$FAILED"
 }
 
+# ----------------------------------------------------------------- disk-plan
+
+# Print the commands that rebuild the original disk layout, UUIDs and all.
+#
+# Timeshift maps mount points from the SNAPSHOT'S OWN fstab, matched by UUID.
+# Restore to a disk whose UUIDs differ and it aborts with an empty device table
+# and no error message at all. There are two ways out, and they suit different
+# situations:
+#
+#   answer the prompts    "Select '/boot/efi' device (default = ...)" -- works on
+#                         any replacement disk, needs someone at the keyboard
+#   match the UUIDs       what this prints -- makes every UUID reference in the
+#                         restored system correct by construction, and lets the
+#                         restore run unattended
+#
+# Matching is worth more than it first appears: fstab is not the only place UUIDs
+# appear. crypttab, the hibernation resume device and anything hand-written in
+# /etc can carry them too. Timeshift runs update-grub so grub.cfg is fixed, but
+# nothing sweeps the rest. Match, and there is nothing to audit.
+#
+# THE ONE RULE: never do this to a disk that will coexist with the original.
+# Two filesystems sharing a UUID make blkid ambiguous and mounts
+# non-deterministic -- you can boot the wrong disk. It is safe for a replacement
+# in a dead machine, and dangerous for a spare in a live one. (This is the same
+# hazard as a restored clone stealing the original's tailnet identity, one layer
+# further down: duplicated identity is fine only when the original is gone.)
+cmd_disk_plan() {
+  local snap="${1:-}" root="$SNAPDIR"
+  if [ -n "$snap" ] && [ -d "$snap" ]; then
+    root=""; local fstab="$snap/localhost/etc/fstab"
+  else
+    [ -n "$snap" ] || snap=$(ls -1 "$SNAPDIR" 2>/dev/null | sort | tail -1)
+    [ -n "$snap" ] || die "no snapshots -- pass a snapshot directory"
+    local fstab="$SNAPDIR/$snap/localhost/etc/fstab"
+  fi
+  [ -r "$fstab" ] || die "cannot read $fstab"
+
+  echo
+  echo "  Disk plan from $fstab"
+  echo "  These are the ORIGINAL identifiers. They exist nowhere else once the"
+  echo "  disk is gone, which is why they are printed from the snapshot."
+  echo
+
+  python3 - "$fstab" <<'PY'
+import re, sys
+rows = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    f = line.split()
+    if len(f) < 3 or f[2] == 'swap':
+        continue
+    rows.append((f[0], f[1], f[2]))
+
+print("  %-40s %-12s %s" % ("SOURCE", "MOUNT", "TYPE"))
+for src, mnt, typ in rows:
+    print("  %-40s %-12s %s" % (src, mnt, typ))
+print()
+print("  Partition a GPT disk with an ESP and a root partition, then:")
+print()
+n = 0
+for src, mnt, typ in rows:
+    n += 1
+    dev = "/dev/sdXN"
+    if not src.startswith("UUID="):
+        print("  # %s is not UUID-based (%s) -- no UUID to preserve" % (mnt, src))
+        continue
+    uuid = src[5:]
+    if typ in ("vfat", "msdos"):
+        # mkfs.vfat takes the volume id as 8 hex digits, no dash.
+        print("  sudo mkfs.vfat -F32 -i %s %s   # %s" % (uuid.replace("-", ""), dev, mnt))
+    elif typ.startswith("ext"):
+        print("  sudo mkfs.%s -U %s %s   # %s" % (typ, uuid, dev, mnt))
+    elif typ == "xfs":
+        print("  sudo mkfs.xfs -m uuid=%s %s   # %s" % (uuid, dev, mnt))
+    else:
+        print("  # %s: %s -- set UUID %s by hand" % (mnt, typ, uuid))
+PY
+
+  cat <<EOF
+
+  Substitute the real partitions for /dev/sdXN. Then restore as usual; with the
+  UUIDs matching, timeshift's prompts have correct defaults and the restore can
+  run unattended.
+
+  DO NOT do this to a disk that will be attached alongside the original. Two
+  filesystems with one UUID make mounts non-deterministic and you can boot the
+  wrong one. Replacement disk in a dead machine: fine. Spare disk in a live
+  machine: no.
+
+  The alternative, which needs no UUID matching, is to answer timeshift's
+  mapping prompts with explicit device names -- see restore-help.
+
+EOF
+}
+
 # ---------------------------------------------------------------- restore-help
 
 cmd_restore_help() {
@@ -633,6 +731,7 @@ case "${1:-status}" in
   verify)              cmd_verify ;;
   watch)               cmd_watch "${2:-60}" ;;
   pull-test)           cmd_pull_test "${2:-}" ;;
+  disk-plan)           cmd_disk_plan "${2:-}" ;;
   restore-help|help)   cmd_restore_help ;;
   *)                   usage ;;
 esac
