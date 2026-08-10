@@ -14,3 +14,10 @@ resume.sh
 
 # Site config for home-backup.sh -- untracked, written by client-setup.sh
 .home-backup.conf
+
+# Apple's camera firmware. Kept on the private archive, never here -- this repo
+# is public, and republishing Apple's blob is redistribution. It is also why
+# upstream ships an extractor rather than the firmware itself.
+# See iteration8:~/archive/facetimehd/ and mba-webcam.sh's MBA_FW_CACHE.
+firmware.bin
+*.bin

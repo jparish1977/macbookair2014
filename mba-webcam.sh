@@ -28,6 +28,20 @@
 
 set -uo pipefail
 
+# --image: build into a DISK bound for a MacBookAir6,x, from a machine that is
+# not one.
+#
+# The two things that persist -- the extracted firmware and the DKMS driver --
+# neither needs the camera present. The firmware is carved out of an Apple driver
+# package fetched over the network, not read off the device. What genuinely
+# cannot happen here is binding the module to hardware that is absent, so
+# preflight and the modprobe are skipped and everything else runs unchanged.
+#
+# The preflight itself stays exactly as strict for normal use: on a real machine,
+# "no [PCI id] device" means this is the wrong script and saying so is the point.
+IMAGE=0
+for _a in "$@"; do [ "$_a" = "--image" ] && IMAGE=1; done
+
 VERSION="1.0"
 
 DRIVER_VER="0.7.0.2"                 # first tag that builds on kernel 7.x
@@ -227,6 +241,52 @@ install_firmware() {
     return 0
   fi
 
+  # A local copy first, if one has been vaulted.
+  #
+  # WHY: the fetch below is a byte-range request into a 2016 macOS update image
+  # on Apple's CDN. The failure text a few lines down already says what usually
+  # goes wrong -- "Apple rotating the CDN URL baked into the Makefile" -- so this
+  # is a known-perishable dependency, not a hypothetical one. Same reasoning as
+  # vaulting the u810 recovery media: what gets lost is never the part you
+  # thought was hard.
+  #
+  # THE CHECKSUM IS THE POINT, not the copy. An unverified cache is a way to
+  # install a wrong or tampered blob everywhere at once, quietly -- so a cache
+  # that does not match is IGNORED rather than trusted, and the network fetch
+  # still happens. Set MBA_FW_SHA256 to pin a different blob deliberately.
+  #
+  # MBA_FW_CACHE takes a path or a URL. Deliberately NOT defaulted to anything:
+  # this repo is public, the blob is Apple's, and a default pointing at somebody
+  # else's host would be inviting exactly the redistribution problem that makes
+  # upstream ship an extractor instead of the firmware.
+  local want="${MBA_FW_SHA256:-e3e6034a67dfdaa27672dd547698bbc5b33f47f1fc7f5572a2fb68ea09d32d3d}"
+  if [ -n "${MBA_FW_CACHE:-}" ]; then
+    say "1/3  Firmware (cache)"
+    local tmp; tmp=$(mktemp /tmp/mba-fw.XXXXXX)
+    local got=""
+    case "$MBA_FW_CACHE" in
+      http://*|https://*) curl -fsS --max-time 60 -o "$tmp" "$MBA_FW_CACHE" 2>/dev/null || true ;;
+      *)                  cp "$MBA_FW_CACHE" "$tmp" 2>/dev/null || true ;;
+    esac
+    [ -s "$tmp" ] && got=$(sha256sum "$tmp" | cut -d' ' -f1)
+    if [ -n "$got" ] && [ "$got" = "$want" ]; then
+      run install -d "$(firmware_dir)/$PKG"
+      run install -m 0644 "$tmp" "$fw"
+      rm -f "$tmp"
+      ok "installed from cache, sha256 verified"
+      info "no network needed for the firmware -- $MBA_FW_CACHE"
+      return 0
+    fi
+    rm -f "$tmp"
+    if [ -n "$got" ]; then
+      warn "cache checksum MISMATCH -- ignoring it and fetching from Apple"
+      info "  wanted $want"
+      info "  got    $got"
+    else
+      warn "cache unreadable ($MBA_FW_CACHE) -- falling back to the network"
+    fi
+  fi
+
   info "Fetching ~2.8MB byte range from Apple's CDN (not the whole image)..."
   BUILD_DIR=$(mktemp -d /tmp/mba-webcam.XXXXXX) || die "Cannot create temp dir."
 
@@ -394,13 +454,21 @@ EOF
 # ---------------------------------------------------------------- commands
 cmd_install() {
   need_root
-  preflight
+  if [ "$IMAGE" = 1 ]; then
+    say "Preflight (--image)"
+    info "Skipping the camera check: this is a build host, not the target."
+    info "The firmware comes from Apple's package over the network, not from the"
+    info "device, so both persistent halves can be built here. The module cannot"
+    info "be LOADED with no camera on the bus -- that is the target's first boot."
+  else
+    preflight
+  fi
   install_firmware
   install_driver
-  load_module
+  [ "$IMAGE" = 1 ] || load_module
 
   say "Done"
-  cmd_status
+  [ "$IMAGE" = 1 ] || cmd_status
   echo
   info "Test it with any of:  cheese  /  guvcview  /  a video call in the browser"
   info "If the picture is dark or washed out, that is this driver's known-weak"
@@ -632,6 +700,7 @@ EOF
 CMD=""
 for arg in "$@"; do
   case "$arg" in
+    --image)                    IMAGE=1 ;;
     --dry-run)                  DRY_RUN=1 ;;
     --no-persist)               TUNE_PERSIST=0 ;;
     --reset)                    TUNE_RESET=1 ;;

@@ -81,7 +81,27 @@ have_ko() {   # $1 = filename glob
 }
 
 doing() { [ "$MODE" = apply ]; }
-run()   { if doing; then "$@"; else echo "      would run: $*"; fi; }
+
+# Count failures and EXIT ON THEM. This used to be a bare `"$@"`, so the script
+# ended with whatever status the last command happened to have -- which meant it
+# exited 0 after the camera install had died and the backlight rule had never
+# been written. An orchestrator above it read that 0 and called the run a
+# success. Reporting success you have not earned is the failure mode this
+# project keeps finding; a runner that discards exit codes manufactures it.
+FAILED=0
+run() {
+  if doing; then
+    # rc CAPTURED FIRST. Writing `bad "... (rc=$?)"` after the increment reports
+    # the ARITHMETIC's status, not the command's -- so a genuine failure printed
+    # "FAILED (rc=0)", which is the same species of lie this whole run has been
+    # hunting: a number that looks like evidence and is not.
+    local rc
+    "$@"; rc=$?
+    [ "$rc" = 0 ] || { FAILED=$((FAILED + 1)); bad "FAILED (rc=$rc): $*"; }
+  else
+    echo "      would run: $*"
+  fi
+}
 
 usage() {
   cat <<EOF
@@ -162,7 +182,12 @@ else
   run sudo apt-get install -y "${NEED[@]}"
 fi
 
-if ! ping -c1 -W3 archive.ubuntu.com >/dev/null 2>&1 && ! ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; then
+# Probe with TCP, not ping. QEMU's user-mode networking does not forward ICMP,
+# so a ping-based check reports "no network" inside every build VM -- which it
+# duly did, on a guest that then downloaded packages from that same archive. A
+# false alarm in a log nobody can act on is worse than no check.
+if ! timeout 6 bash -c 'exec 3<>/dev/tcp/archive.ubuntu.com/80' 2>/dev/null \
+   && ! timeout 6 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then
   warn "no network detected -- the camera firmware and any missing packages need one"
 fi
 
@@ -195,7 +220,7 @@ else
   info "installing the driver and extracting its firmware"
   info "  The blob is downloaded, not shipped -- Apple's, and the extractor"
   info "  fetches it. That makes it an external dependency worth vaulting."
-  run "$HERE/mba-webcam.sh" install
+  run "$HERE/mba-webcam.sh" install ${IMAGE:+--image}
 fi
 
 # ---- 3. Keyboard backlight ---------------------------------------------------
@@ -208,7 +233,7 @@ else
   info "installing the udev rule"
   info "  applesmc registers the backlight LED with a 'nand-disk' default"
   info "  trigger, so disk activity blinks it off. The rule sets it to none."
-  run "$HERE/kbd-backlight.sh" install
+  run "$HERE/kbd-backlight.sh" install ${IMAGE:+--image}
 fi
 
 # ---- 4. Kernel guard ---------------------------------------------------------
@@ -274,3 +299,12 @@ info "     ./client-setup.sh YOUR-SERVER --write"
 info "     ./home-backup.sh init && ./home-backup.sh backup"
 info "     sudo ./system-snapshot.sh configure"
 echo
+
+# The exit status is the whole point of the counting above: whoever called this
+# needs to be able to believe a 0.
+if [ "$FAILED" -gt 0 ]; then
+  echo
+  bad "$FAILED step(s) failed -- see the FAILED lines above"
+  exit 1
+fi
+exit 0

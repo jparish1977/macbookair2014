@@ -56,6 +56,14 @@
 
 set -uo pipefail
 
+# --image: install into a DISK bound for a MacBookAir6,x, from a machine that is
+# not one. The udev rule is just a file and is the whole persistent fix; what
+# cannot be done without the hardware is the "apply it to this session too" half,
+# because there is no LED to write to. So --image installs the rule and skips
+# that, rather than dying on a precondition that is meaningless for an image.
+IMAGE=0
+for _a in "$@"; do [ "$_a" = "--image" ] && IMAGE=1; done
+
 LED_DIR='/sys/class/leds/smc::kbd_backlight'
 TRIGGER="$LED_DIR/trigger"
 BRIGHTNESS="$LED_DIR/brightness"
@@ -110,7 +118,7 @@ cmd_status() {
 
 cmd_install() {
   need_root install
-  need_led
+  [[ "$IMAGE" == 1 ]] || need_led
 
   # 60- so it runs before 99-systemd.rules, which is what starts
   # systemd-backlight@ for this LED. Clearing a trigger turns the LED off, so
@@ -130,6 +138,14 @@ EOF
   echo "wrote $RULE"
 
   udevadm control --reload-rules 2>/dev/null && echo "reloaded udev rules"
+
+  if [[ "$IMAGE" == 1 ]]; then
+    echo "--image: rule installed; not applying to this session (no LED here)"
+    echo "The rule is the persistent fix -- it fires on the target machine's"
+    echo "first boot, when applesmc registers the LED with its nand-disk default."
+    echo
+    return 0
+  fi
 
   # Apply now as well, so this session benefits without a reboot. Detaching the
   # trigger zeroes the LED, hence saving and putting the level back.

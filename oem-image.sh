@@ -341,11 +341,29 @@ cmd_provision() {
   local tar="$WORK/oem-payload.tar.gz"
   tar -czf "$tar" -C "$repo" --exclude='.git' --exclude='*.qcow2' --exclude='*.iso' \
       $(cd "$repo" && ls *.sh 2>/dev/null) 2>/dev/null || die "could not build the payload"
+  # Send the vaulted camera firmware in too, if there is one.
+  #
+  # Without it every image build byte-range-fetches a 2016 macOS update image
+  # from Apple's CDN -- a dependency whose usual failure mode is Apple moving
+  # the URL. With it, building an image needs the archive and nothing from
+  # Apple. mba-webcam.sh still verifies the checksum and still falls back to the
+  # network, so a stale or wrong cache cannot silently poison an image.
+  local vault="${MBA_FW_VAULT:-$HOME/archive/facetimehd/firmware.bin}"
+  local have_fw=0
+  if [ -s "$vault" ]; then
+    cp "$vault" "$WORK/oem-firmware.bin" && have_fw=1
+    ok "camera firmware found in the vault -- this build needs nothing from Apple"
+  else
+    info "no vaulted firmware at $vault -- the guest will fetch from Apple's CDN"
+  fi
+
   ( cd "$WORK" && exec python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 ) &
   local srv=$!
   sleep 2
   guest 'mkdir -p /opt/mba && cd /opt/mba && curl -sS -o p.tgz http://10.0.2.2:8099/oem-payload.tar.gz && tar xzf p.tgz && chmod +x *.sh && echo FE''TCHED' 30
+  [ "$have_fw" = 1 ] && guest 'curl -sS -o /opt/mba/firmware.bin http://10.0.2.2:8099/oem-firmware.bin; echo rc=$?' 60
   kill "$srv" 2>/dev/null
+  rm -f "$WORK/oem-firmware.bin"
   if guest_says 'ls /opt/mba/machine-provision.sh' 10 'machine-provision.sh'; then
     ok "scripts are in the guest"
   else
@@ -365,6 +383,12 @@ cmd_provision() {
 exec >/var/log/oem-provision.log 2>&1
 set -x
 export DEBIAN_FRONTEND=noninteractive
+# Use the vaulted firmware if it arrived. mba-webcam.sh checksums it and falls
+# back to the Apple CDN if it does not match, so this is a shortcut and not a
+# trust decision. (No apostrophes anywhere in this block: it is written through
+# a single-quoted string, so one would end the string early. This comment said
+# so while containing one, which is how the lesson was learned twice.)
+[ -s /opt/mba/firmware.bin ] && export MBA_FW_CACHE=/opt/mba/firmware.bin
 echo "STEP 1/2 machine-provision --image" > /tmp/oem.status
 /opt/mba/machine-provision.sh apply --image
 rc=$?
@@ -393,18 +417,37 @@ chmod +x /opt/mba/run.sh' 15
     *)         bad "timed out after $((waited / 60)) minutes"; die "last status: ${last:-none}" ;;
   esac
 
+  # THE CHECK MUST NOT BE ABLE TO MATCH ITS OWN COMMAND.
+  #
+  # The first version of this passed the thing it was looking for as the pattern
+  # -- `find /lib/modules -name "facetimehd.ko*"` matched against "facetimehd".
+  # A serial console ECHOES the command before running it, so the pattern was
+  # present in the transcript no matter what the filesystem contained. Three
+  # checks passed green on a guest where the camera driver had never installed,
+  # and the two that failed honestly were the only two whose pattern did not
+  # appear in their own command line.
+  #
+  # wait_for_guest already documents this trap and uses `id` because "uid=" cannot
+  # appear in the echo of `id`. The same discipline, generalised: every check runs
+  # a silent test and prints ONLY an exit code. "rc=0" cannot appear in a command
+  # that ends in `rc=$?`.
   say "What actually landed"
   local n=0 f=0
-  chk() {   # $1 = label, $2 = command, $3 = pattern
-    if guest_says "$2" 15 "$3"; then ok "$1"; n=$((n + 1)); else bad "$1"; f=$((f + 1)); fi
+  chk() {   # $1 = label, $2 = test expression (must print nothing)
+    if guest_says "$2 >/dev/null 2>&1; echo rc=\$?" 20 'rc=0'; then
+      ok "$1"; n=$((n + 1))
+    else
+      bad "$1"; f=$((f + 1))
+    fi
   }
-  chk "facetimehd firmware"  'ls -l /lib/firmware/facetimehd/firmware.bin' 'firmware.bin'
-  chk "facetimehd module"    'find /lib/modules -name "facetimehd.ko*"'    'facetimehd'
-  chk "broadcom wl module"   'find /lib/modules -name "wl.ko*"'            'wl.ko'
-  chk "backlight udev rule"  'ls /etc/udev/rules.d/'                       'applesmc-kbd-backlight'
-  chk "kernel-guard hook"    'ls /etc/apt/apt.conf.d/'                     'mba-kernel-guard'
-  chk "dkms present"         'dkms status'                                 'facetimehd'
-  chk "growpart available"   'command -v growpart'                         'growpart'
+  chk "facetimehd firmware" 'test -s /lib/firmware/facetimehd/firmware.bin'
+  chk "facetimehd module"   'test -n "$(find /lib/modules -name facetimehd.ko\*)"'
+  chk "broadcom wl module"  'test -n "$(find /lib/modules -name wl.ko\*)"'
+  chk "backlight udev rule" 'test -f /etc/udev/rules.d/60-applesmc-kbd-backlight.rules'
+  chk "kernel-guard hook"   'test -f /etc/apt/apt.conf.d/99-mba-kernel-guard'
+  chk "dkms has facetimehd" 'dkms status | grep -q facetimehd'
+  chk "dkms has wl"         'dkms status | grep -q broadcom'
+  chk "growpart available"  'command -v growpart'
   echo
   if [ "$f" = 0 ]; then ok "$n/$n present"; else bad "$f of $((n + f)) missing"; fi
 
