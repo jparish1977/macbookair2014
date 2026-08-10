@@ -26,7 +26,8 @@ for a in "$@"; do [[ "$a" == "--push" ]] && PUSH=1; done
 # alias forces HostName iteration8.local, which resolves only on i8's own LAN.
 # From anywhere else it fails, while the tailnet name works in both places.
 # Override with WORKSHOP_HOST=... if the workshop moves.
-WORKSHOP_HOST="${WORKSHOP_HOST:-iteration8.tail51fded.ts.net}"
+# Set WORKSHOP_HOST to your build host. Not baked in: this repo is published.
+WORKSHOP_HOST="${WORKSHOP_HOST:-}"
 WORKSHOP_DIR="${WORKSHOP_DIR:-/srv/kernel-workshop}"
 
 REL=$(uname -r)

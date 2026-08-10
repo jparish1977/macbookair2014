@@ -195,17 +195,23 @@ if [ "$WRITE" != 1 ]; then
   exit 0
 fi
 
-for f in "$OFFSITE_CONF" "$HOME_CONF"; do
-  if [ -e "$f" ] && [ "$FORCE" != 1 ]; then
-    bad "$f already exists"
-    info "Not overwriting a working config. Use --force if you mean to."
-    exit 1
+# Each file decided SEPARATELY. Refusing to write a missing config because a
+# different one already exists is how a half-configured machine stays that way:
+# the first version bailed on both because .offsite.conf was present, and left
+# .home-backup.conf missing while reporting success at the top.
+wrote=0 kept=0
+write_one() {   # $1 = path, $2 = body
+  if [ -e "$1" ] && [ "$FORCE" != 1 ]; then
+    warn "kept existing $(basename "$1") -- --force to replace it"
+    kept=$((kept + 1))
+    return 0
   fi
-done
-printf '%s\n' "$OFFSITE_BODY" > "$OFFSITE_CONF"
-printf '%s\n' "$HOME_BODY"    > "$HOME_CONF"
-chmod 600 "$OFFSITE_CONF" "$HOME_CONF"
-ok "written"
+  printf '%s\n' "$2" > "$1" && chmod 600 "$1" && ok "wrote $(basename "$1")"
+  wrote=$((wrote + 1))
+}
+write_one "$OFFSITE_CONF" "$OFFSITE_BODY"
+write_one "$HOME_CONF"    "$HOME_BODY"
+[ "$wrote" -gt 0 ] || info "nothing to do -- both configs were already there"
 
 # ---- verify ------------------------------------------------------------------
 

@@ -54,8 +54,20 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CONF="$HERE/.home-backup.conf"
 
 # ---- defaults. Override any of these in .home-backup.conf (untracked). -------
+#
+# The config is sourced FIRST, before anything reads these variables. It used to
+# be sourced afterwards, which worked only because the defaults were hardcoded
+# real values -- the moment the hostname moved out of this published repo and
+# the default became empty, the config was being read too late to matter and
+# every run said "no server configured" while the file sat there correctly
+# filled in.
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
 
-REPO_HOST="${HOME_BACKUP_HOST:-iteration8.tail51fded.ts.net}"
+
+# No hostname in a published repo. .home-backup.conf is untracked and
+# client-setup.sh writes it.
+REPO_HOST="${HOME_BACKUP_HOST:-}"
 REPO_USER="${HOME_BACKUP_USER:-joe}"
 REPO_BASE="${HOME_BACKUP_BASE:-/home/joe/backups/restic}"
 REPO_NAME="${HOME_BACKUP_NAME:-$(hostname)}"
@@ -97,9 +109,6 @@ KEEP_MONTHLY="${HOME_BACKUP_KEEP_MONTHLY:-6}"
 
 BROWSE_MINUTES_DEFAULT="${HOME_BACKUP_BROWSE_MINUTES:-15}"
 ACCESS_LOG="${HOME_BACKUP_ACCESS_LOG:-$HOME/.local/state/home-backup-access.log}"
-
-# shellcheck source=/dev/null
-[ -r "$CONF" ] && . "$CONF"
 
 INCLUDE=("${INCLUDE[@]:-${INCLUDE_DEFAULT[@]}}")
 EXCLUDE=("${EXCLUDE[@]:-${EXCLUDE_DEFAULT[@]}}")
@@ -172,6 +181,10 @@ on_mains() {
 
 cmd_status() {
   say "Repo"
+  if [ -z "$REPO_HOST" ]; then
+    bad "no server configured -- run:  ./client-setup.sh YOUR-SERVER --write"
+    exit 1
+  fi
   info "$REPO"
   command -v restic >/dev/null || die "restic missing: sudo apt install restic"
 

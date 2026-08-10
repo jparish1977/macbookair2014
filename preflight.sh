@@ -37,7 +37,13 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REMOTE="${MBA_PREFLIGHT_HOST:-iteration8.tail51fded.ts.net}"
+# The server's address is SITE CONFIG, not something this repo should carry --
+# it is published. .offsite.conf is untracked and client-setup.sh writes it, so
+# there is one source of truth rather than a hostname baked into three scripts.
+# shellcheck source=/dev/null
+[ -r "$HERE/.offsite.conf" ] && . "$HERE/.offsite.conf"
+REMOTE="${MBA_PREFLIGHT_HOST:-${OFFSITE_HOST:-}}"
+[ -n "$REMOTE" ] || REMOTE="__unset__"
 REMOTE_DIR="${MBA_PREFLIGHT_DIR:-/srv/mba-vmtest}"
 DRY=0
 UNHOLD="--unhold"
@@ -255,6 +261,12 @@ fi
 
 say "Checks before anything is changed"
 
+if [ "$REMOTE" = "__unset__" ]; then
+  bad "no server configured"
+  info "This repo does not carry a hostname -- it is published. Point it at yours:"
+  info "  ./client-setup.sh YOUR-SERVER --write"
+  die "then run this again"
+fi
 [ -x "$HERE/system-snapshot.sh" ]  || die "system-snapshot.sh is not next to this script"
 [ -x "$HERE/snapshot-offsite.sh" ] || die "snapshot-offsite.sh is not next to this script"
 [ -x "$HERE/vm-restore-test.sh" ]  || die "vm-restore-test.sh is not next to this script"

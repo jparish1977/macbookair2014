@@ -49,7 +49,7 @@ sudo reboot          # AT THE KEYBOARD -- see the warnings below
 
 Use the **tailnet** name, from anywhere:
 
-    ssh iteration8.tail51fded.ts.net        # or 100.109.232.15
+    ssh iteration8        # or <its tailnet IP>
 
 Not the bare `iteration8` ssh alias. That alias sets `HostName iteration8.local`,
 which resolves only on i8's own LAN — so it works at home and fails everywhere
@@ -198,7 +198,7 @@ squarely in this case rather than needing a cross toolchain. Treat that as
 expected, not established — run `capture-target.sh` on it and believe the `arch`
 file it writes.
 
-Reaching it: it appears on the tailnet as `u810-bunsenlabs` (100.90.76.72), and
+Reaching it: it appears on the tailnet as `u810-bunsenlabs` (<tailnet IP>), and
 like `iteration8` its ssh alias points at a `.local` name that only resolves on
 its own LAN. Use the tailnet address from anywhere else.
 
