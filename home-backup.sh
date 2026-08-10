@@ -64,7 +64,15 @@ REPO_NAME="${HOME_BACKUP_NAME:-$(hostname)}"
 # an include list fails safe: a new directory of junk is not backed up until
 # somebody says so, whereas a new directory of secrets is not silently missed
 # either -- you notice it is absent.
-INCLUDE_DEFAULT=(projects Documents .config .thunderbird .claude drive-inventory .ssh .gnupg .mozilla)
+INCLUDE_DEFAULT=(
+  projects Documents drive-inventory
+  .config .thunderbird .claude .claude.json .ssh .gnupg .mozilla .pki .var
+  .local/share            # app data and game saves; the binaries are excluded below
+  .minetest               # saves
+  wifi-snapshots          # evidence for the open Wi-Fi lockup investigation
+  target-profile-mba      # kernel-workshop capture for this machine
+  recovery-tools rescue-queue.log .e .zoom
+)
 
 # Deliberately absent: Downloads (11.7G of u810 recovery media, archived
 # separately and permanently at iteration8:~/archive/u810 -- it never changes,
@@ -76,6 +84,10 @@ EXCLUDE_DEFAULT=(
   '**/node_modules' '**/__pycache__' '**/.venv' '**/venv'
   '**/.ruff_cache' '**/.mypy_cache' '**/.pytest_cache'
   '**/.Trash*' '**/Trash'
+  # 851M of INSTALLED CLAUDE CODE BINARIES, not history -- .local/share/claude
+  # is a `versions` directory and nothing else. Re-downloadable, and it would
+  # more than double this repo on its own.
+  '**/.local/share/claude'
   '*.iso' '*.qcow2' '*.img'
 )
 
