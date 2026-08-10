@@ -11,3 +11,6 @@ resume.sh
 
 # Site config for home-backup.sh -- untracked on purpose.
 .home-backup.conf
+
+# Site config for home-backup.sh -- untracked, written by client-setup.sh
+.home-backup.conf

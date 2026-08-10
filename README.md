@@ -24,6 +24,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`client-setup.sh`](#client-setupsh) | Point a machine at a provisioned server — discovers the layout by asking the server, writes both configs |
 | [`server-provision.sh`](#server-provisionsh) | Build the **server** side from nothing on any Debian/Ubuntu host — packages, layout, and which filesystems actually survive a disk |
 | [`preflight.sh`](#preflightsh) | **Test an update before this machine takes it** — snapshot, push, rebuild in a VM, run the real upgrade, report a verdict |
 | [`kernel-guard.sh`](#kernel-guardsh) | Apt hook: warn *before* a reboot that would leave the machine with no Wi-Fi |
@@ -1245,6 +1246,37 @@ already established rather than disabling host-key checking, which is the other
 common way to make this symptom disappear. The failure path also prints ssh's own
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
+
+## `client-setup.sh`
+
+    ./client-setup.sh HOST            # discover and show; writes nothing
+    ./client-setup.sh HOST --write
+
+`server-provision.sh` made the server a recipe. The client side was still two
+hand-written files — `.offsite.conf` and `.home-backup.conf` — which meant
+somebody had to know the host, the user, the paths and the repo name. Fine for
+whoever built it, useless for anyone else.
+
+**It asks the server rather than asking you.** `server-provision.sh` creates a
+known layout, so this discovers it: where the snapshot store really is
+(following the symlink), where restic repos live, and — importantly — whether
+that store can hold the xattrs `--fake-super` depends on, because a store that
+can't produces copies that look complete and restore a system owning nothing
+correctly.
+
+Validated against the config written by hand months earlier: it reproduces it
+field for field.
+
+**Two things it refuses to guess at.** The ssh key is found by *probing* which
+key file actually authenticates, not by parsing `ssh -v` — when the key comes
+from the agent, `Offering public key:` prints the key's *comment* rather than a
+path, and the first version cheerfully wrote that into the config.
+`snapshot-offsite.sh` passes it to `ssh -i`, where only a real path works.
+
+**What it will not do, deliberately:** exchange ssh keys, join a tailnet, or set
+the restic passphrase. Those are access decisions and a secret — and the
+passphrase must never pass through this project, because the per-user design is
+precisely what stops two people reading each other's backups.
 
 ## `server-provision.sh`
 
