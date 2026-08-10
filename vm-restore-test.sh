@@ -159,8 +159,26 @@ CARRIER_GB="${MBA_VMTEST_CARRIER_GB:-30}"
 # Step 4 (the pull) then reads and writes md0, but that is the short phase and a
 # three-spindle RAID5 absorbs concurrent read/write far better than one disk.
 #
-# Default keeps everything together, which is right on a single-disk host. Set
-# MBA_VMTEST_CARRIER to split it.
+# MEASURED 2026-08-10, AND IT DOES NOT WORK. Kept because the reasoning is
+# sound and the refutation is more useful than the idea.
+#
+# The split run took 23m against a 20-21m baseline, and iostat showed the two
+# devices TAKING TURNS rather than working at once: md0 at 54-69% during the
+# pull, then ~2% for the entire restore phase while sdc did 37-82%.
+#
+# ~2% is the whole story. This host has 251G of RAM, so the 19G carrier written
+# in step 4 is still entirely in page cache when step 6 reads it back minutes
+# later -- the reads never reach a platter. There was no head contention to
+# split, because there was only ever ONE stream touching disk: the writes. And
+# moving writes onto RAID5 adds a parity penalty a single spindle does not have.
+#
+# The lever that actually works on this host is writing LESS, not spreading it:
+# sealing golden with mv instead of convert (19G saved), and skipping the whole
+# restore when the marker already matches (39G saved).
+#
+# Left configurable because a host with less RAM, where the carrier genuinely
+# would be evicted between phases, is a different machine and the reasoning
+# might hold there. Default keeps everything together.
 CARRIER_IMG="${MBA_VMTEST_CARRIER:-$WORK/carrier.qcow2}"
 
 die()  { echo "error: $*" >&2; exit 1; }
