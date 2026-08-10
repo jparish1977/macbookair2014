@@ -24,6 +24,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`home-backup.sh`](#home-backupsh) | The live user data — encrypted, versioned, restore-tested. Thin wrapper over stock restic |
 | [`client-setup.sh`](#client-setupsh) | Point a machine at a provisioned server — discovers the layout by asking the server, writes both configs |
 | [`server-provision.sh`](#server-provisionsh) | Build the **server** side from nothing on any Debian/Ubuntu host — packages, layout, and which filesystems actually survive a disk |
 | [`preflight.sh`](#preflightsh) | **Test an update before this machine takes it** — snapshot, push, rebuild in a VM, run the real upgrade, report a verdict |
@@ -1246,6 +1247,60 @@ already established rather than disabling host-key checking, which is the other
 common way to make this symptom disappear. The failure path also prints ssh's own
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
+
+## `home-backup.sh`
+
+The system snapshots exclude `/home` by design — they roll the machine back, not
+your files. This is the other half, and a different job: system state changes at
+moments you notice, so snapshots are deliberate; user data changes continuously.
+
+    ./home-backup.sh status         repo, last snapshot, what is covered
+    ./home-backup.sh init           create the repo (once)
+    ./home-backup.sh backup         the main verb
+    ./home-backup.sh restore-test   restore to scratch and COMPARE
+    ./home-backup.sh browse [MIN]   read-only mount, auto-unmounts, logged
+    ./home-backup.sh forget         retention, then prune
+    ./home-backup.sh restic ARGS    plain restic against this repo
+
+**The repo is a bare, standard restic repo, and that is the point.** restic does
+everything genuinely hard — encryption, key handling, dedup, compression,
+snapshots, retention, integrity checks, the FUSE mount — and none of it is
+reimplemented. If this script vanished you would restore with stock restic and
+the passphrase, losing nothing but convenience.
+
+So it only covers what restic leaves to you: the exclusion list (real decisions
+that should be versioned, not retyped), `restore-test` (restic has no
+equivalent — `check` proves the repo is *intact*, not that your files come
+back), `browse`, the same battery/key guards as everything else here, and a
+`restic` passthrough so the real tool works without exporting anything.
+
+Measured on the first real repo: **780 MiB → 371.7 MiB stored, 44s**. The second
+run took **1 second and stored 700 KiB**.
+
+### Why it is encrypted, which is not the obvious reason
+
+This laptop's disk is plain ext4 with no LUKS, so anyone holding it already has
+the data in the clear — the passphrase protects nothing there. It protects every
+*other* copy: iteration8's disk when it is replaced or resold, the 7810's
+drives, and the everyday case of someone with access to a shared machine
+browsing where they did not mean to. **An rsync'd home directory is one careless
+`ls` from showing you something you would rather not have seen; a restic repo is
+opaque blobs with the filenames inside the encrypted metadata.**
+
+Hence per-user repos with per-user passphrases — not distrust, just not putting
+anyone in that position.
+
+### Seeing data while troubleshooting
+
+Three tiers, and most questions never need the third:
+
+    restic stats / snapshots   is it backed up, how big      exposes nothing
+    restic ls / diff           which files, what changed     filenames only
+    browse / restic dump       what is in this file          content
+
+`browse` mounts read-only, unmounts itself after N minutes whether or not you
+remember, and logs each access — so "did I look at that, and when" stays
+answerable, which matters most when the data is not yours.
 
 ## `client-setup.sh`
 

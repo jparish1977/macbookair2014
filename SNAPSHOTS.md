@@ -627,7 +627,42 @@ killed the ssh session issuing it**, because the pattern was in its own command
 line. `vm-restore-test.sh` already warns about exactly this for `pgrep`; use a
 character class (`rest[o]re`) so the pattern cannot match itself.
 
-## Where this was left (2026-08-09, end of day)
+## Where this was left (2026-08-10)
+
+The project now covers three separate jobs, and it is worth keeping them
+distinct because they fail differently and are protected differently.
+
+| | protected by | proven how |
+| --- | --- | --- |
+| system state | `system-snapshot.sh`, `apt-rollback.sh`, `kernel-guard.sh` | restore 6/6, bounce 14/14 |
+| the offsite copy | `snapshot-offsite.sh` → iteration8's **RAID5** | a whole snapshot round-tripped exactly; `pull` verified |
+| updates | `preflight.sh` → the VM rig | used in anger on a real pending update |
+| irreplaceable static media | `iteration8:~/archive/u810` | checksummed, 0 differences |
+| live user data | `home-backup.sh` → encrypted restic | restore-tested, 2078 files identical; third copy on the 7810 |
+| the server itself | `server-provision.sh` | proven on a blank VM, both redundancy branches |
+| a second machine | `client-setup.sh` | reproduces a hand-written config field for field |
+
+**Structural fixes completed 2026-08-10.** The offsite copy moved off the one
+disk with no redundancy onto the RAID5 (`/srv/mba-snapshots` is now a symlink,
+so every config naming the old path still works). 149G of ext4 root reserve
+reclaimed with `tune2fs -m 1`. The browsable `~/backups/mba-home` copy retired
+once everything in it was covered — seven paths were not, including the
+`wifi-snapshots` evidence for the open Wi-Fi thread.
+
+**What is still not done**, and none of it is urgent: `usb-image` has never been
+run and is the only thing here that writes to a block device; the restic
+passphrase needs writing down somewhere that is not the laptop; and the threads
+below.
+
+**The pattern worth carrying out of all this**: nearly every bug found was
+something reporting success it had not earned — a copy matching on entries,
+bytes and hardlinks with every ownership xattr missing; a green verdict on an
+upgrade that did nothing; `grep -q` under `pipefail` turning a match into a
+failure; a check that read "command not found" as "no metadata". Counting files
+proves nothing about a backup. Verify the property that matters, and prove the
+check can fail.
+
+## How it was left on 2026-08-09
 
 The pre-flight workflow is built, documented, and has been **used in anger** —
 run end to end against a real pending update from this laptop.
