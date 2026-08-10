@@ -121,8 +121,19 @@ TEST_RAM="${MBA_VMTEST_TEST_RAM:-4096}"
 # before concluding that guest sizing never matters.
 BUILD_SMP="${MBA_VMTEST_BUILD_SMP:-8}"
 BUILD_RAM="${MBA_VMTEST_BUILD_RAM:-16384}"
-TARGET_GB=40
-CARRIER_GB=30
+# How big the rebuilt disk is. NOT a copy of the laptop's 111G -- the restore
+# partitions with `-n2:0:0` so the root fills whatever it is given, and only the
+# system side is restored (~20G, no /home).
+#
+# It matters for usb-image: `qemu-img convert -O raw` writes the FULL VIRTUAL
+# SIZE including the zeros, so a 40G image needs a 64G stick to hold 20G of data.
+# Build at 26 and it fits a 32G stick with room -- allowing for the gap between
+# a "32 GB" stick and its 29.8 GiB of actual space.
+#
+# Raising it later is free; lowering it below what the snapshot holds makes the
+# restore fail, so leave headroom.
+TARGET_GB="${MBA_VMTEST_TARGET_GB:-40}"
+CARRIER_GB="${MBA_VMTEST_CARRIER_GB:-30}"
 
 die()  { echo "error: $*" >&2; exit 1; }
 say()  { echo; echo "  == $*"; }
@@ -1897,6 +1908,12 @@ cmd_usb_image() {
 
   echo
   ok "$(basename "$out") is ready and shares no identifier with the laptop"
+  echo
+  local virt_gb
+  virt_gb=$(qemu-img info "$out" 2>/dev/null | sed -n 's/.*virtual size: \([0-9.]*\) GiB.*/\1/p')
+  info "The stick must be at least ${virt_gb:-?} GiB -- convert -O raw writes the"
+  info "whole virtual size, zeros included, not just the $(du -h "$out" | cut -f1) in use."
+  info "For a smaller image, rebuild with:  MBA_VMTEST_TARGET_GB=26 $0 restore --force"
   echo
   info "Write it to a USB disk -- ON THE MACHINE THE USB IS PLUGGED INTO, and"
   info "check the device name twice. This overwrites whatever is on it:"

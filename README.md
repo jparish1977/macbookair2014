@@ -1693,9 +1693,19 @@ were trying to protect.
 It also strips the VM-only bits, so what boots is a laptop with the update
 applied rather than a test rig.
 
-**Practicalities.** The image is 40 GB *virtual*, and `convert -O raw` writes the
-full size including zeros — so the target needs to be **64 GB or larger**, and a
-USB 3 SSD rather than a stick unless you enjoy waiting. The ESP already carries
+**Practicalities, and how to need a smaller stick.** `convert -O raw` writes the
+full *virtual* size including the zeros, not just the data. The default build is
+40 GiB holding 19.7 GiB, so it needs a **64 GB** target. The size is not fixed —
+the restore partitions with `-n2:0:0`, so the root simply fills whatever it is
+given:
+
+    MBA_VMTEST_TARGET_GB=26 ./vm-restore-test.sh restore --force
+
+That produces an image that fits a **32 GB** stick (allowing for the gap between
+a "32 GB" stick and its 29.8 GiB of real space), with the root about 77% full.
+Raising the size later is free; setting it below what the snapshot holds makes
+the restore fail, so leave headroom. Prefer a USB 3 SSD over a stick either way
+unless you enjoy waiting. The ESP already carries
 `/EFI/BOOT/BOOTX64.EFI`, so Apple's boot picker will list it when you hold
 Option; that missing fallback path is the usual reason a hand-rolled USB never
 appears.
