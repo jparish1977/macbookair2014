@@ -1279,6 +1279,30 @@ for a specific reason. This one is a preference, and preferences advise.
 It also flags a large ext4 root reserve — 5% of a 3.6 T array is 186 GB doing
 nothing on a data filesystem — and reports rather than changes it.
 
+### Proven on a machine it had never seen
+
+Tested by building a throwaway Ubuntu 24.04 cloud-image VM — the same distro
+iteration8 runs — with three disks: one root and two blanks made into a real
+`md` RAID1 inside the guest.
+
+    provision      apply -> correct layout; BOTH redundancy branches exercised
+    snapshot store a --fake-super tree received with metadata identical to
+                   source: sudo still 104755 0,0 0:0
+    restic repo    init, backup, check, and a restore that came back IDENTICAL
+                   (451 files, byte for byte)
+
+Not covered: the VM rig itself, which needs ~40 GB for target and carrier and
+the guest had 17.
+
+**It found two bugs the real server could not.** `redundancy_of()` reported a
+genuine RAID1 as "unknown" — it stripped a partition suffix before checking
+`/proc/mdstat`, so `md0p1` matched and a bare `md0` became `md` and matched
+nothing. And `attr` was missing from the package list, so `getfattr` did not
+exist; with `2>/dev/null` that is indistinguishable from absent metadata, and it
+cost twenty minutes chasing a transfer that was fine. Both were invisible on
+iteration8 precisely *because* it was configured by hand over months — it
+already had everything.
+
 **What it deliberately will not do:** ssh keys, tailscale membership, the restic
 passphrase. Those are secrets and access decisions, and a provisioning script
 that invents them is worse than one that lists them and stops. The passphrase in
