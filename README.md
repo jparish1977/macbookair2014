@@ -1290,6 +1290,8 @@ reintroducing the bug in a scratch file and confirming it was caught. It found
     ./oem-image.sh provision   # apply the fixes, unattended
     ./oem-image.sh seal        # strip the rig, clear identity, arm the wizard
     ./oem-image.sh verify      # boot a THROWAWAY COPY and check
+    ./oem-image.sh preview     # ...and watch it on screen over VNC
+    ./oem-image.sh screenshot  # capture what preview is showing
 
 Produces a qcow2 whose first boot shows **"create your account"**, not a login
 prompt. Write it to a USB stick and somebody boots a working Mac-on-Linux
@@ -1331,6 +1333,19 @@ straight to a login prompt.
 
 Then `./vm-restore-test.sh usb-image oem-sealed.qcow2` rewrites its UUIDs so it
 cannot fight an internal disk.
+
+**Proven end to end on 2026-08-10.** A human drove the real first-boot wizard on
+a `preview` overlay, and the disk agreed at every point afterwards: the new
+account existed, the `oem` staging account was **gone**, `machine-id` had been
+**generated** (`c60b8332…` — which is what truncating rather than deleting it
+buys), `default.target` was back to `graphical.target`, and the first-boot grow
+marker was present. Meanwhile the sealed image was **byte-for-byte untouched** —
+994 MB of overlay against a 7.5 GB backing file, still armed. That is exactly why
+`preview` and `verify` never boot the sealed image directly.
+
+Sizes, for the record: 12116 MiB at peak → `fstrim` reclaimed **2712 MiB** →
+compaction saved a further **2215 MiB** → **7.1G** shipped. The cleanup is worth
+about 4.9 GB on every copy.
 
 ## `machine-provision.sh`
 

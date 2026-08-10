@@ -1955,13 +1955,46 @@ cmd_usb_image() {
   local m
   for m in dev dev/pts proc sys; do sudo mount --bind "/$m" "$mnt/$m" || die "bind /$m failed"; done
   sudo mount "${dev}p1" "$mnt/boot/efi" || die "cannot mount the copy's ESP"
+
+  # os-prober OFF for this one update-grub, then back on.
+  #
+  # ORDERING BUG, found by hitting the identical thing in oem-image.sh: the
+  # strip above removes 99-vmtest.cfg -- which is the file carrying
+  # GRUB_DISABLE_OS_PROBER=true -- and update-grub then runs in a chroot with
+  # the HOST's /dev bind-mounted. os-prober therefore scans the BUILD SERVER's
+  # disks and writes menu entries for its operating system into a disk meant to
+  # boot a laptop. Measured in the OEM build: 15 references to the build host's
+  # root UUID.
+  #
+  # A separate file rather than reinstating 99-vmtest.cfg, because that one also
+  # carries console=ttyS0, which is exactly what the strip was removing. And it
+  # is deleted immediately after, so the SHIPPED disk keeps Mint's default --
+  # on a MacBook, os-prober is how a macOS partition gets a boot entry, and that
+  # is worth having on the target.
+  sudo tee "$mnt/etc/default/grub.d/99-usb-build.cfg" >/dev/null <<'X'
+# Temporary, written and removed by vm-restore-test.sh usb-image.
+# Mint's 50_linuxmint.cfg sets GRUB_DISABLE_OS_PROBER=false and later files win,
+# hence 99-.
+GRUB_DISABLE_OS_PROBER=true
+X
   sudo chroot "$mnt" update-grub 2>&1 | sed 's/^/    /'
+  sudo rm -f "$mnt/etc/default/grub.d/99-usb-build.cfg"
 
   # Verify rather than hope: the new UUID must be in grub.cfg and the old one
   # must not, or this disk will still reach for the internal root.
+  # `grep -c` PRINTS 0 and EXITS 1 when there are no matches, so `|| echo 0`
+  # appends a second line and the variable becomes "0\n0" -- which `[ -gt ]`
+  # rejects with "integer expression expected". That error went to stderr, the
+  # if was skipped, and the script printed "points at the new root only"
+  # regardless. A safety check that FAILS OPEN is worse than none: this is the
+  # check standing between a USB disk and the internal one it must not be
+  # confused with, and it was reporting a pass it never performed.
+  #
+  # `|| true` discards the STATUS and keeps grep's own "0" as the output.
   local n_new n_old
-  n_new=$(sudo grep -c "$newroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
-  n_old=$(sudo grep -c "$oldroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
+  n_new=$(sudo grep -c "$newroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || true)
+  n_old=$(sudo grep -c "$oldroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || true)
+  n_new=${n_new:-0}; n_old=${n_old:-0}
   [ "$n_new" -gt 0 ] || die "grub.cfg does not reference the new root UUID"
   if [ "$n_old" -gt 0 ]; then
     bad "grub.cfg still references the ORIGINAL root UUID in $n_old place(s)"
