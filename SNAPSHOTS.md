@@ -191,6 +191,22 @@ verified on 2026-08-08/09, and the full recovery path rehearsed in a VM.
    hands you a tree owned by your own user with every mode wrong, which looks
    like it worked. `snapshot-offsite.sh restore-help` spells out the procedure.
 
+   **A whole snapshot has now been pulled back and graded, 2026-08-09 — the round
+   trip is exact.** `2026-08-08_22-13-06` (741,903 files) was deleted locally,
+   which freed **0.4G** — the hardlink economics again: removing an entire
+   snapshot returns almost nothing, because everything it shares with its
+   neighbours stays referenced. `snapshot-offsite.sh pull` brought it back in
+   **1m 13s**, transferring **678 files and 707 MB** out of 741,892 checked, and
+   it returned with an **identical `file_count` and comment**. That match is the
+   real evidence: it was graded against a number captured before the delete, so
+   it is independent of anything the tool asserts about itself. `sudo` came back
+   `0:0:4755` and `shadow` `0:42:0640`.
+
+   **`--link-dest` works against a `--fake-super` sender**, which was reasoned
+   about rather than known. 678 files instead of 741,892 is the proof: had rsync
+   declined to hardlink because the metadata lives in xattrs rather than the
+   filesystem, this would have been a full ~20G copy.
+
    **The pull is tested too, 2026-08-09: 7 of 7 probes correct, all 7 wrong in
    the control.** `pull-test` copies seven probe files rather than 20G and grades
    them against the local snapshot. Without `--fake-super` everything comes back
