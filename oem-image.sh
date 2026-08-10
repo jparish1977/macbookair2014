@@ -486,18 +486,31 @@ cmd_seal() {
   # Regenerating inside the guest, where the build host's disks do not exist,
   # should clear any such entry. This confirms it did: every UUID mentioned in
   # grub.cfg must belong to a partition of this image.
+  # The RESULT goes to a file and only a COUNT comes back over the wire.
+  #
+  # The first version of this echoed "FOREIGN $u" and then grepped the transcript
+  # for FOREIGN -- so it matched the serial console's echo of its own command and
+  # failed a perfectly good image, reporting a foreign UUID that was the empty
+  # string. That is the self-matching trap for the second time in one session,
+  # after fixing it in the provision checks an hour earlier.
+  #
+  # The rule that actually holds: never match a literal that appears in the
+  # command. A count cannot -- the command says "n=$(wc -l ...)", the reply says
+  # "foreign=0", and no echo can produce that.
   say "Checking grub.cfg names no disk but its own"
-  local foreign
-  foreign=$(guest 'own=$(blkid -o value -s UUID /dev/sda1 /dev/sda2 /dev/sda3 2>/dev/null | tr "\n" " ");
+  local scan
+  scan=$(guest 'own=$(blkid -o value -s UUID /dev/sda1 /dev/sda2 /dev/sda3 2>/dev/null | tr "\n" " ");
+    : > /tmp/oem-foreign.txt;
     for u in $(grep -ohE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" /boot/grub/grub.cfg | sort -u); do
-      case " $own " in *" $u "*) ;; *) echo "FOREIGN $u" ;; esac
-    done; echo SCAN''DONE' 30)
-  if grep -q "FOREIGN" <<< "$foreign"; then
+      case " $own " in *" $u "*) ;; *) echo "$u" >> /tmp/oem-foreign.txt ;; esac
+    done; echo "foreign=$(wc -l < /tmp/oem-foreign.txt)"' 30)
+  if grep -q 'foreign=0' <<< "$scan"; then
+    ok "every UUID in grub.cfg belongs to this image"
+  else
     bad "grub.cfg references a disk that is not part of this image:"
-    grep -o "FOREIGN [0-9a-f-]*" <<< "$foreign" | sed 's/^/      /'
+    guest 'cat /tmp/oem-foreign.txt' 20 | sed 's/^/      /'
     die "that is a build-host identifier -- do not ship this image"
   fi
-  ok "every UUID in grub.cfg belongs to this image"
 
   # First boot has to grow the filesystem, or a 20 GiB image on a 128 GB SSD
   # wastes 108 GB. cloud-init is not present on a desktop install, so this is a
@@ -576,10 +589,25 @@ systemctl enable oem-firstboot-grow.service 2>&1 | tail -1' 30
   # wizard; anything done after it risks being what the wizard finds.
   say "Arming the account wizard"
   guest 'oem-config-prepare --quiet 2>&1 | tail -2; echo rc=$?' 60
-  if guest_says 'ls /var/lib/oem-config/' 15 'run'; then
-    ok "oem-config is armed -- next boot asks for an account"
+
+  # Check the mechanism this version of oem-config ACTUALLY uses.
+  #
+  # The first version looked for a /var/lib/oem-config/run flag file, which is
+  # how older oem-config armed itself. Mint 22.3 does it by pointing
+  # default.target at oem-config.target -- so oem-config-prepare succeeded,
+  # printed the symlink it had just created, returned 0, and the check called it
+  # a failure and refused to seal a perfectly good image.
+  #
+  # Worth naming the difference from the last two bugs: those were checks that
+  # PASSED without evidence. This one FAILED with evidence sitting in front of
+  # it. Both come from the check and the thing being checked disagreeing about
+  # what success looks like -- and only the false pass is dangerous, which is
+  # exactly why it is worth erring this way round.
+  if guest_says 'test "$(systemctl get-default)" = oem-config.target; echo rc=$?' 20 'rc=0'; then
+    ok "armed: default.target is oem-config.target -- next boot asks for an account"
   else
-    bad "oem-config-prepare did not leave its run flag"
+    bad "default.target is not oem-config.target"
+    guest 'systemctl get-default' 15 | sed 's/^/      /'
     die "the image would boot to a login prompt for the staging account"
   fi
 
@@ -643,6 +671,24 @@ cmd_verify() {
   fi
   ok "no serial shell, as expected"
 
+  # ...but ON ITS OWN that proves very little, and pretending otherwise would be
+  # the same self-congratulation this project keeps catching. "No serial login"
+  # is equally consistent with "the graphical wizard is running" and "the kernel
+  # panicked before reaching userspace". Absence of evidence, read as evidence.
+  #
+  # The overlay is the discriminator: a system that reached userspace writes --
+  # journal, logs, oem-config state -- and every one of those writes lands in the
+  # overlay because the backing file is read-only. A qcow2 that is still nearly
+  # empty means nothing ever ran.
+  local grew; grew=$(du -m "$scratch" | cut -f1)
+  if [ "${grew:-0}" -ge 8 ]; then
+    ok "the overlay grew to ${grew} MiB -- userspace ran and wrote to disk"
+  else
+    bad "the overlay is only ${grew} MiB -- nothing wrote to it"
+    warn "that means this did NOT boot, and the check above passed for the wrong reason"
+    warn "look at it directly:  ./oem-image.sh preview"
+  fi
+
   # Ask the DISK, not the screen. The flag file is the thing that decides, and
   # the question is about the sealed image -- which the overlay has been
   # protecting all along. Checking the overlay would only tell us what one boot
@@ -658,8 +704,17 @@ cmd_verify() {
   sudo mount -o ro "$root" "$mnt" || { nbd_detach; die "cannot mount the sealed image"; }
   if sudo test -s "$mnt/etc/machine-id"; then bad "the sealed image has a machine-id"; verdict=1
   else ok "machine-id is still empty -- every copy will generate its own"; fi
-  if sudo test -e "$mnt/var/lib/oem-config/run"; then ok "still armed -- the boot above consumed nothing"
-  else bad "NOT armed -- this would boot to a login prompt"; verdict=1; fi
+  # Same mechanism seal checks, read off the disk instead of from inside a guest:
+  # Mint 22.3 arms the wizard by pointing default.target at oem-config.target,
+  # not by leaving a run flag.
+  local deftgt; deftgt=$(sudo readlink "$mnt/etc/systemd/system/default.target" 2>/dev/null)
+  if grep -q oem-config.target <<< "$deftgt"; then
+    ok "still armed -- the boot above consumed nothing"
+  else
+    bad "NOT armed -- this would boot to a login prompt"
+    sed 's/^/      now: /' <<< "$deftgt"
+    verdict=1
+  fi
   if sudo sh -c "ls '$mnt'/etc/ssh/ssh_host_* >/dev/null 2>&1"; then
     bad "the sealed image carries ssh host keys"; verdict=1
   else ok "no ssh host keys"; fi
@@ -671,6 +726,81 @@ cmd_verify() {
                      || bad "VERDICT: do not ship this image"
   echo
   return "$verdict"
+}
+
+# ---- preview -----------------------------------------------------------------
+
+# Boot the sealed image on screen, so a human can watch the first-boot wizard.
+#
+# ALWAYS ON A THROWAWAY OVERLAY, for the same reason verify is: oem-config runs
+# once and deletes its own flag. Booting the sealed image to look at the wizard
+# would consume the thing being looked at, and the stick you handed out would go
+# straight to a login prompt for an account nobody has the password for. The
+# overlay makes this repeatable -- click all the way through the wizard, create a
+# fake account, prove the whole path works, then throw the overlay away and the
+# sealed image is untouched.
+#
+# This is also the closest a VM can get to the real test. It proves the image
+# BOOTS and the wizard RUNS. It cannot prove Wi-Fi associates, the camera
+# captures or the backlight lights: no BCM4360, no FaceTime HD, no Apple SMC.
+# That is what usb-image and the real laptop are for.
+cmd_preview() {
+  [ -s "$SEALED" ] || die "no $SEALED -- run ./oem-image.sh seal first"
+  vm_stop
+  local scratch="$WORK/oem-preview.qcow2"
+  rm -f "$scratch"
+  qemu-img create -f qcow2 -b "$SEALED" -F qcow2 "$scratch" >/dev/null \
+    || die "cannot create the throwaway overlay"
+  cp /usr/share/OVMF/OVMF_VARS_4M.fd "$VARS" || die "cannot copy OVMF vars"
+  rm -f "$SOCK"
+
+  qemu-system-x86_64 -enable-kvm -cpu host -smp "$SMP" -m "$RAM" \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file="$VARS" \
+    -device ich9-ahci,id=ahci \
+    -drive file="$scratch",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
+    -netdev user,id=n0 -device e1000,netdev=n0 \
+    -device ich9-intel-hda -device hda-duplex \
+    -vga std -vnc "127.0.0.1:$VNC_DISP" \
+    -serial "unix:$SOCK,server,nowait" \
+    -monitor "unix:$WORK/oem-mon.sock,server,nowait" \
+    -pidfile "$PIDF" > "$WORK/oem-qemu.log" 2>&1 &
+
+  local i; for i in $(seq 1 30); do vm_running && break; sleep 1; done
+  vm_running || die "qemu did not start -- see $WORK/oem-qemu.log"
+
+  ok "booting oem-preview.qcow2 -- $(basename "$SEALED") is NOT touched"
+  echo
+  info "From your laptop:"
+  echo "    ssh -N -L $((5900 + VNC_DISP)):localhost:$((5900 + VNC_DISP)) $(hostname)"
+  echo "    vncviewer localhost:$((5900 + VNC_DISP))"
+  echo
+  info "Expect: Mint boots, then the OEM wizard asks for language, keyboard,"
+  info "timezone and an account. That is the whole point of the image."
+  info "Click all the way through if you like -- it is a scratch overlay."
+  echo
+  info "When done:  ./oem-image.sh stop   (then rm $scratch)"
+  echo
+}
+
+# Capture the framebuffer.
+#
+# Added because "it booted" is a report and a screenshot is evidence -- and the
+# distinction between those two has been the whole theme of building this. The
+# restore rig has had this since the beginning; preview shipped without it and
+# the gap showed up the first time somebody needed to say what was on screen.
+cmd_screenshot() {
+  [ -S "$WORK/oem-mon.sock" ] || die "no monitor socket -- only 'preview' opens one, and only since this was added (restart it)"
+  local out="${1:-$WORK/oem-screen.ppm}"
+  python3 "$WORK/mon.py" "$WORK/oem-mon.sock" "screendump $out" >/dev/null 2>&1
+  sleep 1
+  [ -s "$out" ] || die "screendump produced nothing"
+  if command -v pnmtopng >/dev/null 2>&1; then
+    pnmtopng "$out" > "${out%.ppm}.png" 2>/dev/null && out="${out%.ppm}.png"
+  elif command -v convert >/dev/null 2>&1; then
+    convert "$out" "${out%.ppm}.png" 2>/dev/null && out="${out%.ppm}.png"
+  fi
+  ok "screenshot: $out ($(du -h "$out" | cut -f1))"
 }
 
 # ---- status ------------------------------------------------------------------
@@ -693,6 +823,8 @@ case "${1:-}" in
   provision) cmd_provision ;;
   seal)      cmd_seal ;;
   verify)    cmd_verify ;;
+  preview)   cmd_preview ;;
+  screenshot) cmd_screenshot "${2:-}" ;;
   status)    cmd_status ;;
   stop)      vm_stop; ok "stopped" ;;
   sh)        guest "${2:-id}" "${3:-10}" ;;
@@ -705,6 +837,8 @@ oem-image.sh -- Mint + this repo's fixes, as an image to hand somebody
   provision   apply the fixes, unattended
   seal        strip the rig, clear identity, arm the wizard
   verify      boot a throwaway copy and check
+  preview     boot a throwaway copy ON SCREEN, to watch the wizard
+  screenshot  capture what preview is showing
   status      where things stand
   stop        kill the VM
   sh CMD      run CMD in the running guest
