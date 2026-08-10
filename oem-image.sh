@@ -448,10 +448,37 @@ chmod +x /opt/mba/run.sh' 15
   chk "dkms has facetimehd" 'dkms status | grep -q facetimehd'
   chk "dkms has wl"         'dkms status | grep -q broadcom'
   chk "growpart available"  'command -v growpart'
+  chk "toolkit installed"   'test -x /opt/macbookair2014/mba-wifi.sh'
+  chk "toolkit in skel"     'test -L /etc/skel/macbookair2014'
   echo
   if [ "$f" = 0 ]; then ok "$n/$n present"; else bad "$f of $((n + f)) missing"; fi
 
   info ""
+  # Leave the toolkit ON the machine, not just its effects.
+  #
+  # provision stages the scripts in /opt/mba and seal deletes that -- correctly,
+  # it is build scaffolding. But deleting it shipped an image with working
+  # hardware and no way to ASK about the hardware: no mba-wifi.sh on a laptop
+  # whose only network is Wi-Fi, no client-setup.sh on a machine whose whole
+  # selling point is that backups are a flip of a switch, no status commands for
+  # any of it. The fixes are not the deliverable; being able to run and diagnose
+  # them is.
+  #
+  # /opt/macbookair2014 is the real home, and a symlink goes into /etc/skel so
+  # the account the wizard creates finds it in their own home directory without
+  # anybody having to know the path.
+  #
+  # Only tracked scripts go in. Site configs (.offsite.conf, .home-backup.conf)
+  # are untracked for a reason and belong to whoever built this, not to whoever
+  # receives it -- the payload tar is *.sh only, so they cannot ride along.
+  say "Installing the toolkit"
+  guest 'install -d /opt/macbookair2014 && cp /opt/mba/*.sh /opt/macbookair2014/ \
+         && chmod +x /opt/macbookair2014/*.sh \
+         && rm -f /opt/macbookair2014/oem-image.sh /opt/macbookair2014/vm-restore-test.sh \
+         && install -d /etc/skel \
+         && ln -sfn /opt/macbookair2014 /etc/skel/macbookair2014; echo rc=$?' 30
+  guest 'ls /opt/macbookair2014/ | wc -l; ls -l /etc/skel/macbookair2014 | tail -1' 20 | sed 's/^/      /'
+
   info "The modules BUILT. Whether they WORK cannot be tested here -- there is no"
   info "BCM4360, no FaceTime HD and no Apple SMC in this VM. That is what booting"
   info "the finished image on the real laptop is for."
@@ -468,6 +495,8 @@ cmd_seal() {
                   wait_for_guest 60 || die "no serial login"; }
 
   say "Removing the build rig"
+  # /opt/mba is the STAGING copy and goes; /opt/macbookair2014 is the installed
+  # toolkit and stays. One character of difference, opposite intentions.
   guest 'rm -rf /etc/systemd/system/serial-getty@ttyS0.service.d /etc/default/grub.d/99-oem-build.cfg /opt/mba && update-grub 2>&1 | tail -2' 90
   if guest_says 'grep -c console=ttyS0 /boot/grub/grub.cfg || true' 15 '^0'; then
     ok "serial console gone from grub.cfg"
