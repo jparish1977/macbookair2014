@@ -342,27 +342,23 @@ cmd_provision() {
   # a foreground command on a serial console would time out mid-build and leave
   # no way to tell a slow build from a dead one.
   say "Applying the fixes -- DKMS builds, 10-20 minutes"
-  info "this machine is not a MacBook, so machine-provision.sh will refuse..."
-  info "...which is correct, and why provisioning uses its pieces directly here."
+  info "machine-provision.sh apply --image does the work: it owns the ORDER, and"
+  info "there is no second copy of it here to drift out of step with it."
 
   guest 'cat > /opt/mba/run.sh <<'"'"'EOS'"'"'
 #!/bin/bash
 exec >/var/log/oem-provision.log 2>&1
 set -x
 export DEBIAN_FRONTEND=noninteractive
-echo "STEP 1/5 toolchain" > /tmp/oem.status
-apt-get update -qq
-apt-get install -y dkms build-essential "linux-headers-$(uname -r)" \
-        curl xz-utils cpio cloud-guest-utils attr
-echo "STEP 2/5 camera" > /tmp/oem.status
-/opt/mba/mba-webcam.sh install
-echo "STEP 3/5 backlight" > /tmp/oem.status
-/opt/mba/kbd-backlight.sh install
-echo "STEP 4/5 kernel guard" > /tmp/oem.status
-/opt/mba/kernel-guard.sh install-hook --notify
-echo "STEP 5/5 wifi" > /tmp/oem.status
-dpkg -s broadcom-sta-dkms >/dev/null 2>&1 || apt-get install -y broadcom-sta-dkms
-echo "DONE:rc=0" > /tmp/oem.status
+echo "STEP 1/2 machine-provision --image" > /tmp/oem.status
+/opt/mba/machine-provision.sh apply --image
+rc=$?
+# Image-only, so it stays here rather than in machine-provision.sh: growpart is
+# what lets one 20 GiB image fill a 128 GB SSD on first boot, and a machine
+# being provisioned in place has no partition to grow.
+echo "STEP 2/2 first-boot tooling" > /tmp/oem.status
+apt-get install -y cloud-guest-utils attr || rc=$((rc + 1))
+echo "DONE:rc=$rc" > /tmp/oem.status
 EOS
 chmod +x /opt/mba/run.sh' 15
   guest 'setsid /opt/mba/run.sh </dev/null >/dev/null 2>&1 & echo STAR''TED' 10

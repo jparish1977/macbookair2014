@@ -33,8 +33,29 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-MODE="${1:-check}"; TUNE=0
-for a in "$@"; do [ "$a" = "--tune" ] && TUNE=1; done
+MODE="${1:-check}"; TUNE=0; IMAGE=0
+for a in "$@"; do
+  [ "$a" = "--tune" ]  && TUNE=1
+  [ "$a" = "--image" ] && IMAGE=1
+done
+
+# --image: we are provisioning a DISK destined for a MacBookAir6,x, from a VM
+# that is not one.
+#
+# This is not a weakening of the hardware check below, and it matters that it is
+# not. The refusal exists so nobody installs Apple-specific drivers on non-Apple
+# hardware they are going to USE. Building an image changes what "the target" is:
+# the disk is bound for the right machine, the builder is scaffolding. So the
+# vendor gate is answered rather than bypassed -- and everything that can only be
+# true on real hardware (wl loaded, an SMC to attach an LED to) is reported as
+# EXPECTED-ABSENT instead of as a fault, because in a VM those are not failures
+# and calling them failures teaches you to ignore the report.
+#
+# oem-image.sh calls this. It used to carry its own copy of the order, which is
+# precisely the duplication this repo keeps rediscovering: two lists that drift.
+if [ "$IMAGE" = 1 ]; then
+  export DEBIAN_FRONTEND=noninteractive
+fi
 
 say()  { echo; echo -e "\033[1;36m==> $*\033[0m"; }
 ok()   { echo -e "    \033[32m[ok]\033[0m   $*"; }
@@ -49,6 +70,15 @@ die()  { echo; echo -e "\033[31mERROR: $*\033[0m" >&2; exit 1; }
 # script in this repo to be bitten by it; capture first, match second.
 MODS=$(lsmod 2>/dev/null)
 mod_loaded() { grep -q "^$1 " <<< "$MODS"; }
+
+# "Did it build?" -- deliberately NO PIPELINE. The obvious spelling,
+# `find ... | grep -q .`, is the SIGPIPE trap again: grep -q exits at the first
+# hit, find dies of 141, and pipefail turns a module that IS there into "NO".
+# Writing this the wrong way first is how it earned the comment.
+have_ko() {   # $1 = filename glob
+  local out; out=$(find /lib/modules -name "$1" 2>/dev/null)
+  [ -n "$out" ]
+}
 
 doing() { [ "$MODE" = apply ]; }
 run()   { if doing; then "$@"; else echo "      would run: $*"; fi; }
@@ -80,17 +110,26 @@ say "Hardware"
 VENDOR=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)
 MODEL=$(cat /sys/class/dmi/id/product_name 2>/dev/null)
 info "$VENDOR $MODEL"
-case "$VENDOR" in
-  *Apple*) ;;
-  *) bad "this is not an Apple machine"
-     die "these fixes are for a MacBookAir6,x -- installing them here would just break things" ;;
-esac
-case "$MODEL" in
-  MacBookAir6,*) ok "supported model" ;;
-  *) warn "$MODEL is a Mac but not a MacBookAir6,x"
-     info "The camera and backlight fixes were written and tested for 6,1."
-     info "They may be right for you; nobody has checked. Proceeding." ;;
-esac
+if [ "$IMAGE" = 1 ]; then
+  ok "--image: building a disk for a MacBookAir6,x, not provisioning this host"
+  info "  Hardware checks below are ADVISORY here. A driver cannot load against"
+  info "  a device this machine does not have, so 'not loaded' is the expected"
+  info "  result in a VM -- what matters is that it BUILT and will be there when"
+  info "  the disk reaches the machine it is for."
+else
+  case "$VENDOR" in
+    *Apple*) ;;
+    *) bad "this is not an Apple machine"
+       info "If you meant to build an IMAGE for one, use: $0 apply --image"
+       die "these fixes are for a MacBookAir6,x -- installing them here would just break things" ;;
+  esac
+  case "$MODEL" in
+    MacBookAir6,*) ok "supported model" ;;
+    *) warn "$MODEL is a Mac but not a MacBookAir6,x"
+       info "The camera and backlight fixes were written and tested for 6,1."
+       info "They may be right for you; nobody has checked. Proceeding." ;;
+  esac
+fi
 
 [ -d /sys/firmware/efi ] && ok "booted UEFI" || warn "not booted UEFI -- unusual on this hardware"
 
@@ -132,6 +171,8 @@ fi
 say "Wi-Fi (BCM4360)"
 if mod_loaded wl; then
   ok "wl is loaded -- Mint ships broadcom-sta, so this usually needs nothing"
+elif [ "$IMAGE" = 1 ] && dpkg -s broadcom-sta-dkms >/dev/null 2>&1; then
+  ok "broadcom-sta-dkms installed and built; wl cannot load with no BCM4360 here"
 elif dpkg -s broadcom-sta-dkms >/dev/null 2>&1; then
   warn "broadcom-sta-dkms is installed but wl is not loaded"
   info "  Try: sudo modprobe wl    (and check 'dkms status' built it for $(uname -r))"
@@ -200,7 +241,15 @@ fi
 # ---- report ------------------------------------------------------------------
 
 say "State"
-printf '    %-22s %s\n' "wl loaded"        "$(mod_loaded wl && echo yes || echo NO)"
+# In an image the question is "did it BUILD", not "did it load" -- there is no
+# BCM4360 to bind to. Reporting a bare NO here would be a false alarm on every
+# single image build, and a report that always shows a failure gets ignored.
+if [ "$IMAGE" = 1 ]; then
+  printf '    %-22s %s\n' "wl module built"  "$(have_ko 'wl.ko*'         && echo yes || echo NO)"
+  printf '    %-22s %s\n' "facetimehd built" "$(have_ko 'facetimehd.ko*' && echo yes || echo NO)"
+else
+  printf '    %-22s %s\n' "wl loaded"        "$(mod_loaded wl && echo yes || echo NO)"
+fi
 printf '    %-22s %s\n' "facetimehd fw"    "$([ -s /lib/firmware/facetimehd/firmware.bin ] && echo yes || echo no)"
 printf '    %-22s %s\n' "backlight rule"   "$([ -f "$RULE" ] && echo yes || echo no)"
 printf '    %-22s %s\n' "kernel-guard hook" "$([ -f "$HOOK" ] && echo yes || echo no)"

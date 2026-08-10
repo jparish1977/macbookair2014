@@ -87,6 +87,40 @@ for f in *.sh workshop/*.sh; do
 done
 [ "$FOUND" = 0 ] && ok "none" || info ""
 
+# ---- 1b. the same trap INSIDE a command substitution -------------------------
+#
+# Check 1 only looks at lines that BEGIN a conditional, and check 1 excludes
+# $( ) outright because the substitution normally discards the pipeline's status.
+# Both were right about the cases that prompted them and together they left a
+# hole, which was found the honest way -- by writing the bug into
+# machine-provision.sh while adding a status line:
+#
+#   printf '%s' "$(find /lib/modules -name 'wl.ko*' | grep -q . && echo yes || echo NO)"
+#
+# The line starts with printf, so check 1 never looks at it; it is inside $( ),
+# so the exclusion would have skipped it anyway. But the status is NOT discarded
+# here -- `&&` consumes it inside the substitution -- so a module that IS there
+# prints NO. Report it when a pipeline inside $( ) is followed by && or ||.
+say "grep -q / head inside \$( ), with its status consumed by && or ||"
+n=0
+for f in *.sh workshop/*.sh; do
+  [ -f "$f" ] || continue
+  [ "$f" = "lint.sh" ] && continue
+  grep -q "set -.*pipefail" "$f" || continue
+  # The exclusion must test the PRODUCER, which is whatever follows $( -- not
+  # whatever the line begins with. Getting that wrong is why the first version of
+  # this check reported "none" against the very line that motivated it: the line
+  # began with printf, so the borrowed check-1 exclusion skipped it, even though
+  # the producer inside the substitution was find.
+  hits=$(code_lines "$f" \
+    | grep -E '\$\([^)]*\|[^)]*(grep -q|head )[^)]*(&&|\|\|)' \
+    | grep -vE '\$\((echo|printf) ' || true)
+  [ -z "$hits" ] && continue
+  echo "  $f"; echo "$hits" | sed 's/^/      /' | cut -c1-110
+  n=$((n + $(echo "$hits" | grep -c .)))
+done
+[ "$n" = 0 ] && ok "none" || FOUND=$((FOUND + n))
+
 # ---- 2. pgrep patterns that match the script's own command line --------------
 #
 # `pgrep -f "vm-restore-test.sh restore"` matches the shell running it, because
