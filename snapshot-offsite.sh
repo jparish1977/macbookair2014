@@ -140,6 +140,7 @@ usage: $0 status                what exists both ends, and whether a push can wo
        $0 watch [SECONDS]       readable progress for a push running elsewhere
        $0 pull-test [DIR]       prove the copy restores: pull probes back (root)
        $0 disk-plan [SNAP]      the mkfs commands that recreate the ORIGINAL UUIDs
+       $0 pull SNAP [--force]   bring one snapshot back from the remote, verified
        $0 restore-help          how to get the tree back, and the trap on the way
 
 This is DISASTER RECOVERY -- for a dead disk. For rolling back a bad update use
@@ -696,6 +697,146 @@ EOF
   echo
 }
 
+# ---------------------------------------------------------------------- pull
+
+# Bring one snapshot back from the remote.
+#
+# WHY THIS EXISTS AS A COMMAND AND NOT AS A PARAGRAPH
+#
+# restore-help documents the rsync, and pull-test proves the mechanism works.
+# Neither actually pulls anything, so the operation you would perform in a real
+# recovery -- at the worst possible moment -- was a command to be retyped from a
+# document, with one flag that is easy to omit and whose omission produces a tree
+# that looks completely fine and is unusable. This project normally ENCODES that
+# kind of rule rather than trusting anyone to remember it.
+#
+# THE FLAG
+#
+# --fake-super has to be named on the REMOTE side, because that is where the real
+# ownership is parked in xattrs. Leave it out and you get a tree owned by your
+# own user with every mode wrong -- including both setuid bits gone, which is a
+# recovered system that boots and cannot escalate.
+#
+# WHY --link-dest MATTERS MORE THAN IT LOOKS
+#
+# The remote tree is hardlinked, but rsync only preserves links WITHIN the set it
+# transfers. Pull one snapshot on its own and every file is a fresh copy -- a
+# full ~20G, not the increment you would expect from a snapshot that shares
+# almost everything with its neighbours. Pointing --link-dest at a snapshot still
+# held locally makes unchanged files hardlink instead, so the pull costs roughly
+# the delta in both space and transfer.
+cmd_pull() {
+  need_root pull
+  local snap="" force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --force) force=1 ;;
+      *)       snap="$a" ;;
+    esac
+  done
+
+  rsh true 2>/dev/null || { bad "cannot reach $REMOTE_USER@$REMOTE_HOST"; why_unreachable; exit 1; }
+
+  local avail; avail=$(remote_snaps)
+  [ -n "$avail" ] || die "no snapshots on the remote"
+  if [ -z "$snap" ]; then
+    echo
+    echo "  usage: sudo $0 pull SNAPSHOT [--force]"
+    echo
+    echo "  On the remote:"
+    printf '%s\n' "$avail" | sed 's/^/    /'
+    echo
+    echo "  Held locally already:"
+    local_snaps | sed 's/^/    /'
+    echo
+    exit 1
+  fi
+
+  printf '%s\n' "$avail" | grep -qx "$snap" || die "no snapshot named '$snap' on the remote"
+
+  if [ -d "$SNAPDIR/$snap" ] && [ "$force" = 0 ]; then
+    bad "$snap is already here: $SNAPDIR/$snap"
+    info "Pulling over a snapshot you still hold would overwrite the thing you"
+    info "would be checking the pull against. If you truly mean to replace it:"
+    info "  sudo $0 pull $snap --force"
+    exit 1
+  fi
+
+  # The newest OTHER local snapshot, to hardlink unchanged files against.
+  local link; link=$(local_snaps | grep -vx "$snap" | tail -1)
+
+  echo
+  echo "  pulling $snap"
+  echo "    from  $REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/$snap"
+  echo "    to    $SNAPDIR/$snap"
+  if [ -n "$link" ]; then
+    echo "    hardlinking unchanged files against $link, so this costs the delta"
+    echo "    rather than a full ~20G copy"
+  else
+    warn "no other local snapshot to hardlink against -- this will pull the FULL"
+    echo "        tree (~20G). That is correct for a bare-metal recovery and"
+    echo "        merely wasteful if you have a sibling snapshot you deleted."
+  fi
+  echo
+
+  build_rsync_cmd
+  local -a cmd=("${RSYNC_CMD[@]}" --info=progress2)
+  [ -n "$link" ] && cmd+=(--link-dest="$SNAPDIR/$link")
+  mkdir -p "$SNAPDIR/$snap" || die "cannot create $SNAPDIR/$snap"
+
+  local start; start=$(date +%s)
+  "${cmd[@]}" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/$snap/" "$SNAPDIR/$snap/" \
+    || die "the pull failed. Nothing else has been touched; it resumes from --partial-dir."
+  local secs=$(( $(date +%s) - start ))
+  ok "transferred in $((secs / 60))m $((secs % 60))s"
+
+  # ---- verify, because "it looks like it worked" is the failure mode here.
+  #
+  # There is no local copy to grade against -- that is the whole point of a pull
+  # -- so check against ABSOLUTE expectations instead. sudo is the decisive one:
+  # without --fake-super it comes back 1000:1000 with the setuid bit gone.
+  echo
+  local sudo_meta shadow_meta bad_count=0
+  sudo_meta=$(meta_of "$SNAPDIR/$snap/localhost/usr/bin/sudo")
+  shadow_meta=$(meta_of "$SNAPDIR/$snap/localhost/etc/shadow")
+  printf '  %-14s %s\n' "usr/bin/sudo" "$sudo_meta"
+  printf '  %-14s %s\n' "etc/shadow"   "$shadow_meta"
+  echo
+
+  case "$sudo_meta" in
+    0:0:4755) ok "sudo came back root-owned and still setuid" ;;
+    MISSING)  bad "usr/bin/sudo is not in the pulled tree"; bad_count=$((bad_count + 1)) ;;
+    *)        bad "sudo came back as $sudo_meta, expected 0:0:4755"
+              echo "        That is what a pull WITHOUT --fake-super looks like: a"
+              echo "        system that boots and cannot escalate. Do not restore this."
+              bad_count=$((bad_count + 1)) ;;
+  esac
+  case "$shadow_meta" in
+    0:0:*|MISSING) bad "etc/shadow came back as $shadow_meta -- expected root:shadow 0640"
+                   bad_count=$((bad_count + 1)) ;;
+    0:*:0640)      ok "shadow kept its non-root group and 0640" ;;
+    *)             bad "etc/shadow came back as $shadow_meta, expected 0:<shadow>:0640"
+                   bad_count=$((bad_count + 1)) ;;
+  esac
+
+  if [ -s "$SNAPDIR/$snap/info.json" ]; then
+    ok "info.json present -- timeshift will list it$(snap_comment "$snap" | sed 's/^/: /')"
+  else
+    bad "no info.json, so timeshift will not see this snapshot"
+    bad_count=$((bad_count + 1))
+  fi
+
+  echo
+  if [ "$bad_count" = 0 ]; then
+    ok "PULLED AND VERIFIED. $snap is restorable."
+    info "Confirm it is listed:  ./system-snapshot.sh list"
+  else
+    bad "$bad_count check(s) failed -- do NOT restore from this copy"
+    info "The tree is at $SNAPDIR/$snap; delete it once you have looked."
+    return 1
+  fi
+}
+
 # ----------------------------------------------------------------- disk-plan
 
 # Print the commands that rebuild the original disk layout, UUIDs and all.
@@ -858,6 +999,7 @@ case "${1:-status}" in
   list|ls)             cmd_list "${2:-}" ;;
   verify)              cmd_verify ;;
   watch)               cmd_watch "${2:-60}" ;;
+  pull)                shift 2>/dev/null; cmd_pull "$@" ;;
   pull-test)           cmd_pull_test "${2:-}" ;;
   disk-plan)           cmd_disk_plan "${2:-}" ;;
   restore-help|help)   cmd_restore_help ;;
