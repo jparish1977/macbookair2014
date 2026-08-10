@@ -196,6 +196,19 @@ verified on 2026-08-08/09, and the full recovery path rehearsed in a VM.
    **Timeshift maps mount points from the snapshot's own fstab**, aborting with
    an empty table and no error on a disk whose UUIDs do not match.
 
+   **`rsync -X` does NOT carry these xattrs, and the copy it makes passes almost
+   every check.** Found 2026-08-09 moving this store from `sdc` to the RAID. The
+   obvious command — `rsync -aHAX --numeric-ids SRC/ DST/` — silently arrives
+   with no ownership metadata, because rsync **deliberately hides its own
+   `user.rsync.*` attributes** from ordinary transfers; they are its internal
+   fake-super store, not user data. The result matched on **entries (3,789,622),
+   bytes (20,573,231,396) and hardlinks (link count 5)** and had lost every
+   `%stat` xattr: a tree that restores a system where `sudo` is not setuid and
+   `/etc/shadow` belongs to your login user. **Verify by reading an xattr, never
+   by counting files.** Two things that do work: naming `--fake-super` on the
+   copy even when it is local, or `cp -a --preserve=all`, which has no such
+   filter.
+
    The trap is on the way back: **pulling the tree home also needs
    `--fake-super`, named on the remote side.** Omit it and rsync cheerfully
    hands you a tree owned by your own user with every mode wrong, which looks

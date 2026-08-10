@@ -30,6 +30,35 @@
 # --fake-super on the remote side, or you get a directory owned by your user with
 # the real metadata stranded in xattrs nobody read. `restore-help` spells it out.
 #
+# AND THE SHARPER VERSION OF THAT TRAP: -X DOES NOT COPY THESE XATTRS.
+#
+# Found 2026-08-09 moving this store between two local disks. The obvious
+# command is wrong:
+#
+#     rsync -aHAX --numeric-ids /srv/mba-snapshots/ /home/mba-snapshots/
+#
+# -X is --xattrs, so you would expect it to carry them. It does not. rsync
+# DELIBERATELY HIDES its own user.rsync.* attributes from ordinary transfers --
+# they are its internal fake-super store, not user data -- so the copy silently
+# arrives with no ownership metadata at all.
+#
+# What makes this genuinely dangerous is how well the result passes inspection.
+# Measured on the real 23G store, that copy matched on:
+#
+#     entries      3,789,622 = 3,789,622
+#     bytes        20,573,231,396 = identical
+#     hardlinks    link count 5, so -H worked perfectly
+#
+# ...and every fake-super xattr was gone. Three checks out of four green, and a
+# tree that restores a system where sudo is not setuid and /etc/shadow belongs
+# to your login user. Verify by reading an XATTR, never by counting files.
+#
+# Two things that do work:
+#
+#     rsync -aHAX --numeric-ids --fake-super SRC/ DST/   name it even locally
+#     cp -a --preserve=all                               cp has no such filter
+#
+#
 # WHY -H IS NOT OPTIONAL
 #
 # Every snapshot is a complete tree whose unchanged files are hardlinks into the
