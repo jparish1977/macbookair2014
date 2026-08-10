@@ -280,6 +280,20 @@ GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200"
 GRUB_TERMINAL="console serial"
 GRUB_TIMEOUT=3
 GRUB_TIMEOUT_STYLE=menu
+
+# os-prober OFF while building, and this is not about speed.
+#
+# update-grub here runs in a chroot on the BUILD HOST, so os-prober scans the
+# host's disks and cheerfully writes a boot entry for the build server's own
+# operating system into the image. Observed, not theorised: the first wire run
+# added "Ubuntu 24.04.4 LTS on /dev/sdc4" -- iteration8's root -- to a public
+# image, carrying its root UUID with it. Exactly the build-host contamination
+# this repo has been scrubbing out of tracked files.
+#
+# It is set HERE, in the file seal deletes, so the shipped image keeps Mint's
+# default. On a MacBook os-prober is how a macOS partition gets a menu entry,
+# and disabling that permanently would be a real loss on the target hardware.
+GRUB_DISABLE_OS_PROBER=true
 EOF
 
   local m
@@ -417,6 +431,30 @@ cmd_seal() {
   else
     warn "console=ttyS0 may still be in grub.cfg -- harmless on a laptop, but check"
   fi
+
+  # No disk but this one may be named in grub.cfg.
+  #
+  # `wire` regenerates grub in a chroot on the build host, where os-prober scans
+  # the HOST's disks -- and on the first run it duly added a menu entry for
+  # iteration8's own Ubuntu root, UUID and all, to an image meant to be handed
+  # out. wire now disables os-prober while building, but a fix you do not check
+  # is a fix you hope for, and this is the last point at which it can be caught.
+  #
+  # Regenerating inside the guest, where the build host's disks do not exist,
+  # should clear any such entry. This confirms it did: every UUID mentioned in
+  # grub.cfg must belong to a partition of this image.
+  say "Checking grub.cfg names no disk but its own"
+  local foreign
+  foreign=$(guest 'own=$(blkid -o value -s UUID /dev/sda1 /dev/sda2 /dev/sda3 2>/dev/null | tr "\n" " ");
+    for u in $(grep -ohE "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" /boot/grub/grub.cfg | sort -u); do
+      case " $own " in *" $u "*) ;; *) echo "FOREIGN $u" ;; esac
+    done; echo SCAN''DONE' 30)
+  if grep -q "FOREIGN" <<< "$foreign"; then
+    bad "grub.cfg references a disk that is not part of this image:"
+    grep -o "FOREIGN [0-9a-f-]*" <<< "$foreign" | sed 's/^/      /'
+    die "that is a build-host identifier -- do not ship this image"
+  fi
+  ok "every UUID in grub.cfg belongs to this image"
 
   # First boot has to grow the filesystem, or a 20 GiB image on a 128 GB SSD
   # wastes 108 GB. cloud-init is not present on a desktop install, so this is a
