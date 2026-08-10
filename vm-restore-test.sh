@@ -1980,6 +1980,51 @@ X
   sudo chroot "$mnt" update-grub 2>&1 | sed 's/^/    /'
   sudo rm -f "$mnt/etc/default/grub.d/99-usb-build.cfg"
 
+  # grub-install as well as update-grub. THIS is what made the first stick
+  # unbootable on the laptop -- a bare `grub>` prompt with no menu, on a disk
+  # whose /boot/grub/grub.cfg was perfectly correct and verified so below.
+  #
+  # update-grub writes /boot/grub/grub.cfg on the ROOT. The ESP carries a
+  # SECOND, one-line config -- EFI/ubuntu/grub.cfg -- whose whole job is to
+  # tell the signed GRUB binary which filesystem to go and read the real one
+  # from:
+  #
+  #     search.fs_uuid <root-uuid> root hd0,gpt2
+  #     set prefix=($root)'/boot/grub'
+  #     configfile $prefix/grub.cfg
+  #
+  # That file is written by grub-install, never by update-grub. So the
+  # `tune2fs -U` above left it naming the UUID this image had BEFORE the copy.
+  # GRUB searched every disk for a filesystem that no longer exists anywhere,
+  # fell through with $root still pointing at the ESP, found no
+  # (ESP)/boot/grub/grub.cfg, and dropped to the prompt.
+  #
+  # The prefix is compiled into the signed grubx64.efi and always says
+  # /EFI/ubuntu, which is why the stub there is the one that matters even when
+  # the firmware loaded EFI/BOOT/BOOTX64.EFI.
+  #
+  # --removable refreshes that BOOTX64.EFI, which is the only path a Mac's
+  # Option-key picker will load off a USB disk -- it does not consult NVRAM
+  # boot entries for foreign media.
+  # --no-nvram because a chroot has no efivarfs, and writing the BUILD HOST's
+  # boot order would be the wrong thing to do even if it did.
+  sudo chroot "$mnt" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+       --bootloader-id=ubuntu --removable --no-nvram --recheck 2>&1 | sed 's/^/    /'
+
+  # The ESP gets the same treatment as grub.cfg: checked, not hoped for. The
+  # old check looked only at the root filesystem, which is precisely why it
+  # passed on a disk that could not boot.
+  local stale
+  stale=$(sudo grep -rl "$oldroot" "$mnt/boot/efi" 2>/dev/null || true)
+  if [ -n "$stale" ]; then
+    bad "the ESP still names the ORIGINAL root UUID:"
+    echo "$stale" | sed 's/^/    /'
+    die "this disk would stop at a bare grub prompt -- refusing to call it ready"
+  fi
+  sudo grep -rq "$newroot" "$mnt/boot/efi" 2>/dev/null \
+    || die "the ESP names neither root UUID -- grub-install did not write a stub"
+  ok "the ESP stub points at the new root"
+
   # Verify rather than hope: the new UUID must be in grub.cfg and the old one
   # must not, or this disk will still reach for the internal root.
   # `grep -c` PRINTS 0 and EXITS 1 when there are no matches, so `|| echo 0`

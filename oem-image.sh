@@ -417,6 +417,76 @@ chmod +x /opt/mba/run.sh' 15
     *)         bad "timed out after $((waited / 60)) minutes"; die "last status: ${last:-none}" ;;
   esac
 
+  # Ubiquity crashes on real hardware, and only on real hardware.
+  #
+  #   File "/usr/lib/ubiquity/ubiquity/misc.py", line 1061, in _on_got_unit_proxy
+  #   AttributeError: 'NoneType' object has no attribute 'get_string'
+  #
+  # SystemdUnitWatcher('sound.target') calls LoadUnit, gets an object path, then
+  # builds a DBus proxy for it ASYNCHRONOUSLY. sound.target is not active during
+  # the wizard -- oem-config.target declares Conflicts=multi-user.target -- so
+  # systemd is free to drop the unloaded unit again before the proxy caches its
+  # properties. get_cached_property() then hands back None and upstream calls
+  # .get_string() on it with no guard. The wizard dies on its first page.
+  #
+  # It is a RACE, which is why every VM build sailed through it and a 20MB/s USB
+  # stick did not. The same oem-config.log shows dconf timing out in the same
+  # session -- the machine was losing deadlines everywhere.
+  #
+  # The callback being guarded only plays the system-ready chime
+  # (canberra-gtk-play, gtk_ui.py). Skipping it costs a sound effect.
+  #
+  # Sent as base64 because the patch contains quotes, backslashes and newlines,
+  # and this goes over a serial console -- the same channel where an apostrophe
+  # inside a comment has broken this script twice.
+  say "Patching the ubiquity sound.target race"
+  local ub_py ub_b64
+  ub_py=$(cat <<'PYEOF'
+import sys
+p="/usr/lib/ubiquity/ubiquity/misc.py"
+s=open(p).read()
+old='        active_state = self.proxy.get_cached_property(\n            "ActiveState"\n        ).get_string()\n'
+new='        prop = self.proxy.get_cached_property("ActiveState")\n        if prop is None:\n            return\n        active_state = prop.get_string()\n'
+if new in s: print("PATCH already"); sys.exit(0)
+if old not in s: print("PATCH notfound"); sys.exit(1)
+open(p,"w").write(s.replace(old,new,1)); print("PATCH ok")
+PYEOF
+)
+  ub_b64=$(printf '%s' "$ub_py" | base64 -w0)
+  guest "echo $ub_b64 | base64 -d > /tmp/ubfix.py && python3 /tmp/ubfix.py \
+         && python3 -m py_compile /usr/lib/ubiquity/ubiquity/misc.py; echo rc=\$?" 30 \
+    | sed 's/^/      /'
+
+  info ""
+  # Leave the toolkit ON the machine, not just its effects.
+  #
+  # provision stages the scripts in /opt/mba and seal deletes that -- correctly,
+  # it is build scaffolding. But deleting it shipped an image with working
+  # hardware and no way to ASK about the hardware: no mba-wifi.sh on a laptop
+  # whose only network is Wi-Fi, no client-setup.sh on a machine whose whole
+  # selling point is that backups are a flip of a switch, no status commands for
+  # any of it. The fixes are not the deliverable; being able to run and diagnose
+  # them is.
+  #
+  # /opt/macbookair2014 is the real home, and a symlink goes into /etc/skel so
+  # the account the wizard creates finds it in their own home directory without
+  # anybody having to know the path.
+  #
+  # Only tracked scripts go in. Site configs (.offsite.conf, .home-backup.conf)
+  # are untracked for a reason and belong to whoever built this, not to whoever
+  # receives it -- the payload tar is *.sh only, so they cannot ride along.
+  #
+  # This runs BEFORE the checks below. It used to run after them, so a fresh
+  # provision reported "toolkit installed" MISSING and then installed it -- a
+  # red verdict on work the same function was about to do.
+  say "Installing the toolkit"
+  guest 'install -d /opt/macbookair2014 && cp /opt/mba/*.sh /opt/macbookair2014/ \
+         && chmod +x /opt/macbookair2014/*.sh \
+         && rm -f /opt/macbookair2014/oem-image.sh /opt/macbookair2014/vm-restore-test.sh \
+         && install -d /etc/skel \
+         && ln -sfn /opt/macbookair2014 /etc/skel/macbookair2014; echo rc=$?' 30
+  guest 'ls /opt/macbookair2014/ | wc -l; ls -l /etc/skel/macbookair2014 | tail -1' 20 | sed 's/^/      /'
+
   # THE CHECK MUST NOT BE ABLE TO MATCH ITS OWN COMMAND.
   #
   # The first version of this passed the thing it was looking for as the pattern
@@ -450,35 +520,11 @@ chmod +x /opt/mba/run.sh' 15
   chk "growpart available"  'command -v growpart'
   chk "toolkit installed"   'test -x /opt/macbookair2014/mba-wifi.sh'
   chk "toolkit in skel"     'test -L /etc/skel/macbookair2014'
+  chk "ubiquity crash guard" 'grep -q "prop = self.proxy.get_cached_property" /usr/lib/ubiquity/ubiquity/misc.py'
   echo
   if [ "$f" = 0 ]; then ok "$n/$n present"; else bad "$f of $((n + f)) missing"; fi
 
   info ""
-  # Leave the toolkit ON the machine, not just its effects.
-  #
-  # provision stages the scripts in /opt/mba and seal deletes that -- correctly,
-  # it is build scaffolding. But deleting it shipped an image with working
-  # hardware and no way to ASK about the hardware: no mba-wifi.sh on a laptop
-  # whose only network is Wi-Fi, no client-setup.sh on a machine whose whole
-  # selling point is that backups are a flip of a switch, no status commands for
-  # any of it. The fixes are not the deliverable; being able to run and diagnose
-  # them is.
-  #
-  # /opt/macbookair2014 is the real home, and a symlink goes into /etc/skel so
-  # the account the wizard creates finds it in their own home directory without
-  # anybody having to know the path.
-  #
-  # Only tracked scripts go in. Site configs (.offsite.conf, .home-backup.conf)
-  # are untracked for a reason and belong to whoever built this, not to whoever
-  # receives it -- the payload tar is *.sh only, so they cannot ride along.
-  say "Installing the toolkit"
-  guest 'install -d /opt/macbookair2014 && cp /opt/mba/*.sh /opt/macbookair2014/ \
-         && chmod +x /opt/macbookair2014/*.sh \
-         && rm -f /opt/macbookair2014/oem-image.sh /opt/macbookair2014/vm-restore-test.sh \
-         && install -d /etc/skel \
-         && ln -sfn /opt/macbookair2014 /etc/skel/macbookair2014; echo rc=$?' 30
-  guest 'ls /opt/macbookair2014/ | wc -l; ls -l /etc/skel/macbookair2014 | tail -1' 20 | sed 's/^/      /'
-
   info "The modules BUILT. Whether they WORK cannot be tested here -- there is no"
   info "BCM4360, no FaceTime HD and no Apple SMC in this VM. That is what booting"
   info "the finished image on the real laptop is for."
