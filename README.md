@@ -24,6 +24,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`preflight.sh`](#preflightsh) | **Test an update before this machine takes it** — snapshot, push, rebuild in a VM, run the real upgrade, report a verdict |
 | [`kernel-guard.sh`](#kernel-guardsh) | Apt hook: warn *before* a reboot that would leave the machine with no Wi-Fi |
 | [`apt-rollback.sh`](#apt-rollbacksh) | Undo a bad apt transaction precisely, from apt's own records |
 | [`system-snapshot.sh`](#system-snapshotsh) | A local known-good snapshot for when you *don't* know what changed |
@@ -1244,6 +1245,61 @@ common way to make this symptom disappear. The failure path also prints ssh's ow
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
 
+## `preflight.sh`
+
+The one command that ties the rest together. It runs **from the laptop** and does
+the whole chain: snapshot this machine, push it offsite, rebuild it in a VM on
+iteration8, run the update the laptop is about to run, and report a verdict with
+the exact next steps.
+
+    ./preflight.sh                    # the whole chain, about an hour
+    ./preflight.sh --skip-push        # reuse the offsite copy as it stands
+    ./preflight.sh --keep-holds       # do not lift the kernel holds in the VM
+    ./preflight.sh --confirm-good     # AFTER applying and rebooting: re-baseline
+    ./preflight.sh --dry-run
+
+**Do not run it with sudo.** It refuses, and the reason is not fussiness: under
+`sudo`, ssh reads `/root/.ssh/known_hosts`, which has never seen iteration8, and
+`BatchMode` cannot prompt — so it fails as a network error that is not a network
+error. The steps needing root call `sudo` themselves, and the push depends on
+`SUDO_USER` pointing at *you* to find your SSH key.
+
+**The snapshot it takes does two jobs, deliberately.** It is the input to the
+test, so what gets tested is *this machine* rather than an approximation; and it
+is the rollback point if the update goes badly on the metal. That is why the
+order matters — it is taken before anything is applied.
+
+**Long remote steps are detached and polled, not held open.** The restore and the
+update each run 15–25 minutes, and holding one ssh connection that long *from
+this laptop* invites the documented Wi-Fi lockup to eat a run that was otherwise
+fine. A dropped connection costs a poll, not the run — and because `golden` is
+marked with the snapshot it was built from, resuming with `--skip-push` skips the
+restore entirely rather than repeating it.
+
+### The verdict distinguishes two very different outcomes
+
+A run where a **new kernel** arrived and one where **only packages moved** need
+different advice, and conflating them is how you get told to boot-test something
+that does not exist. When no kernel changed it says so and tells you no reboot is
+needed — the four things a VM cannot test (Wi-Fi associating, camera, sound,
+backlight) are only at risk from a kernel change.
+
+Both paths tell you to **put the holds back** after upgrading. Leaving them
+unheld removes the protection that stops a new kernel arriving unannounced, which
+has been the procedure on this machine.
+
+### `--confirm-good`, the other half
+
+Run it *after* applying an update and rebooting. It checks the machine really is
+good — `wl` loaded, Wi-Fi connected, `facetimehd`, no failed units,
+`kernel-guard` clean — and **refuses to snapshot if `wl` is missing**. A snapshot
+labelled "known good" of a machine that is not is worse than none: it is a
+rollback point that restores the problem, and you find out on the day you need
+it.
+
+It needs mains power, like every other path that writes for minutes on an
+eleven-year-old battery.
+
 ## `vm-restore-test.sh`
 
 The offsite copy is verified faithful and the restore is proven on real hardware,
@@ -1612,6 +1668,40 @@ be inventing a result.
 takes the card away: the five hardware checks go red and `audio:userspace`
 correctly stays green, being a package check. Without that control they would
 only ever prove that qemu was asked for a sound card.
+
+### `usb-image` — test on the real machine without touching its disk
+
+    ./vm-restore-test.sh usb-image [IMAGE]
+
+The VM can prove an update installs, builds its modules and boots. It can never
+prove Wi-Fi associates, the camera captures or the backlight lights — there is no
+BCM4360, no FaceTime HD and no Apple SMC to emulate. This writes a VM-approved
+image to a USB disk so that last mile can be tested on real hardware **with the
+internal disk untouched**: failure costs an unplug rather than a rollback.
+
+**It rewrites every identifier, and that is not optional.** A raw copy keeps the
+original's UUIDs, and a USB disk in the same machine is the definition of a disk
+that coexists with the original — two filesystems sharing a UUID make mounts
+non-deterministic, and then a kernel install writes to the *internal* ESP you
+were trying to protect.
+
+    root   a fresh filesystem UUID (tune2fs -U), fstab and grub.cfg follow
+    GPT    fresh disk and partition GUIDs (sgdisk -G)
+    ESP    fstab switches to PARTUUID=, since changing a FAT volume id in place
+           needs mtools, which is not installed
+
+It also strips the VM-only bits, so what boots is a laptop with the update
+applied rather than a test rig.
+
+**Practicalities.** The image is 40 GB *virtual*, and `convert -O raw` writes the
+full size including zeros — so the target needs to be **64 GB or larger**, and a
+USB 3 SSD rather than a stick unless you enjoy waiting. The ESP already carries
+`/EFI/BOOT/BOOTX64.EFI`, so Apple's boot picker will list it when you hold
+Option; that missing fallback path is the usual reason a hand-rolled USB never
+appears.
+
+**Not yet run.** It is also the only thing in this repo that writes to a block
+device, so its first use deserves supervision.
 
 **zram needs no help at all.** `/dev/zram0` comes back with the restore at
 priority 100, ahead of the disk swapfile at -1, because it is configured on the
