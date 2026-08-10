@@ -97,7 +97,11 @@ if command -v timeshift >/dev/null; then
   TS_UUID=$(grep -oP '"backup_device_uuid"\s*:\s*"\K[^"]*' /etc/timeshift/timeshift.json 2>/dev/null)
   TS_DEV=$(blkid -U "$TS_UUID" 2>/dev/null)
   [ -n "$TS_DEV" ] || TS_DEV=$(findmnt -no SOURCE / 2>/dev/null)
-  if timeout 60 timeshift --list --scripted --snapshot-device "$TS_DEV" 2>/dev/null | grep -q '^[0-9]'; then
+  # Captured first: timeshift --list writes a table, and grep -q exiting on the
+  # first row SIGPIPEs it under pipefail -- reporting "no snapshots" when there
+  # are some, which here would skip a deletion the user asked for. See lint.sh.
+  TS_LIST=$(timeout 60 timeshift --list --scripted --snapshot-device "$TS_DEV" 2>/dev/null)
+  if grep -q '^[0-9]' <<< "$TS_LIST"; then
     timeout 300 timeshift --delete-all --yes --scripted --snapshot-device "$TS_DEV"
     ok "snapshots deleted"
   else

@@ -66,8 +66,15 @@ as_user_systemctl() {
 WP_STOPPED=""
 unload_module() { modprobe -r "$MOD" 2>/dev/null; }
 
+# Capture, then match. `lsmod | grep -q` under `set -o pipefail` reports FAILURE
+# on a successful match: grep -q exits at the first hit, lsmod dies of SIGPIPE,
+# and the pipeline returns 141. Load-order dependent, so it fires on some
+# modules and not others -- which is why it reads as absurd rather than as a bug.
+# Caught by lint.sh after the same mistake was made three times in one day.
+module_loaded() { grep -q "^$1 " <<< "$(lsmod)"; }
+
 say "Reloading the driver"
-if lsmod | grep -q "^$MOD"; then
+if module_loaded "$MOD"; then
   if ! unload_module; then
     user=$(desktop_user)
     if [ -n "$user" ] && as_user_systemctl "$user" stop wireplumber; then
@@ -77,13 +84,13 @@ if lsmod | grep -q "^$MOD"; then
     fi
   fi
 
-  if ! lsmod | grep -q "^$MOD"; then
+  if ! module_loaded "$MOD"; then
     : # already gone
   elif ! unload_module; then
     bad "The driver is stuck and won't unload."
     # A task frozen inside the driver (state D) cannot be signalled, and holds
     # the module against any unload. Only a reboot clears that.
-    if ps -eo stat= | grep -q '^D'; then
+    if grep -q '^D' <<< "$(ps -eo stat=)"; then
       info "A process is frozen inside the driver — a reboot is the only fix."
     else
       info "Something still holds the camera that stopping WirePlumber did not free."

@@ -154,7 +154,9 @@ summarise_one() {
   # have since removed or replaced is not worth reading.
   if [ -n "$pkg" ]; then
     local pkgname; pkgname=${pkg%% *}
-    if ! dpkg -l "$pkgname" 2>/dev/null | grep -q '^ii'; then
+    # Captured, not piped: dpkg -l writes a header plus wrapped description
+    # text, so grep -q exits early and SIGPIPEs it under pipefail. See lint.sh.
+    if ! grep -q '^ii' <<< "$(dpkg -l "$pkgname" 2>/dev/null)"; then
       warn "$pkgname is no longer installed — this report is moot"
     fi
   fi

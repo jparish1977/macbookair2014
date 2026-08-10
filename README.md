@@ -24,6 +24,8 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`machine-provision.sh`](#machine-provisionsh) | A fresh Mint install on a MacBookAir6,x → a working machine, in the right order |
+| [`lint.sh`](#lintsh) | Check this repo for the traps it has actually been bitten by |
 | [`home-backup.sh`](#home-backupsh) | The live user data — encrypted, versioned, restore-tested. Thin wrapper over stock restic |
 | [`client-setup.sh`](#client-setupsh) | Point a machine at a provisioned server — discovers the layout by asking the server, writes both configs |
 | [`server-provision.sh`](#server-provisionsh) | Build the **server** side from nothing on any Debian/Ubuntu host — packages, layout, and which filesystems actually survive a disk |
@@ -1247,6 +1249,62 @@ already established rather than disabling host-key checking, which is the other
 common way to make this symptom disappear. The failure path also prints ssh's own
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
+
+## `lint.sh`
+
+    ./lint.sh            report
+    ./lint.sh --strict   exit non-zero (for a hook)
+
+The same bug was reintroduced **three times in one day, in three scripts, by the
+same hands**. Documenting it did not stop it. A helper function did not stop it,
+because a helper still has to be remembered. This repo's habit elsewhere is to
+*encode* a rule rather than rely on recall — `system-snapshot.sh` refuses network
+targets outright instead of explaining that they are wrong — and this is that
+habit turned on its own source.
+
+It checks four things, each one a trap this project actually hit:
+
+    grep -q / head as a CONDITION under pipefail   the SIGPIPE bug
+    pgrep -f patterns that match their own argv    killed an ssh session
+    pgrep -x with a name over 15 characters        silently matches nothing
+    rsync -X on a fake-super tree, no --fake-super the copy that looks complete
+
+**It is narrow on purpose.** ~87 pipelines end in `grep -q` or `head` here and
+most are harmless — the status is discarded, or the producer finishes first. A
+check that flagged all of them would be noise, and a check that cries wolf is one
+nobody reads, which is the criticism this project levelled at its own
+`restore-test` earlier the same day. So it excludes `echo`/`printf` producers,
+pipelines inside `$( )`, comments, and the guest scripts embedded in heredocs
+(which run without `pipefail`).
+
+Finding it clean means nothing unless it can fail, so that was tested by
+reintroducing the bug in a scratch file and confirming it was caught. It found
+**five latent instances** in scripts untouched that day — `fix-camera.sh`,
+`crash-report.sh`, `optimize-mba.sh` — which are now fixed.
+
+## `machine-provision.sh`
+
+    ./machine-provision.sh              # report only
+    ./machine-provision.sh apply
+    ./machine-provision.sh apply --tune # ...and the power tuning, opt-in
+
+Every fix here already had an installer. What did not exist was the **order**, so
+"Mint with our fixes" lived only in somebody's head — fine for whoever built it,
+useless for handing a machine to anyone else.
+
+It **refuses on non-Apple hardware**, and that refusal is absolute rather than a
+preference: `facetimehd` is a driver for one specific camera, and building it
+elsewhere is not conservative, it is breakage. (Compare `server-provision.sh`,
+which only *advises* about redundancy — that is a preference.)
+
+Mint already ships the Broadcom driver, so Wi-Fi usually needs nothing; the real
+gap is the camera, the backlight rule and the kernel guard. `optimize-mba.sh` is
+**opt-in** — it was declined on the machine this repo was written for, and an
+image should not quietly impose a choice its author rejected.
+
+Headers are checked the way DKMS needs them — `/lib/modules/$(uname -r)/build` —
+not by asking for `linux-headers-generic`, which is a *series* meta-package and
+would pull a different kernel's headers onto a machine running another.
 
 ## `home-backup.sh`
 
