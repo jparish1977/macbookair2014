@@ -74,6 +74,7 @@ INCLUDE_DEFAULT=(projects Documents .config .thunderbird .claude drive-inventory
 EXCLUDE_DEFAULT=(
   '**/.cache' '**/Cache' '**/CachedData' '**/Code Cache' '**/GPUCache'
   '**/node_modules' '**/__pycache__' '**/.venv' '**/venv'
+  '**/.ruff_cache' '**/.mypy_cache' '**/.pytest_cache'
   '**/.Trash*' '**/Trash'
   '*.iso' '*.qcow2' '*.img'
 )
@@ -250,17 +251,29 @@ cmd_restore_test() {
     || { rm -rf "$scratch"; die "restore failed"; }
 
   say "Comparing restored against live"
+
+  # The diff MUST honour the same exclusions as the backup, or it reports every
+  # excluded directory as a difference -- __pycache__ and friends exist live and
+  # were deliberately never backed up, so `diff -rq` calls them "Only in".
+  # The first run of this cried wolf on eight of them and offered the wrong
+  # explanation for why. A restore test that always looks broken is one nobody
+  # reads.
+  local -a dx=()
+  local e
+  for e in "${EXCLUDE[@]}"; do dx+=(-x "${e#\*\*/}"); done
+
   local out rc
-  out=$(diff -rq "$HOME/$subject" "$scratch$HOME/$subject" 2>&1); rc=$?
+  out=$(diff -rq "${dx[@]}" "$HOME/$subject" "$scratch$HOME/$subject" 2>&1); rc=$?
   if [ "$rc" = 0 ]; then
-    ok "identical -- every file came back byte for byte"
+    ok "identical -- every backed-up file came back byte for byte"
     info "$(find "$scratch$HOME/$subject" -type f 2>/dev/null | wc -l) files compared"
+    info "(excluded paths were skipped on both sides, as they should be)"
   else
-    warn "differences found (files changed since the snapshot will show here):"
+    warn "REAL differences -- these are not excluded paths:"
     echo "$out" | head -15 | sed 's/^/        /'
     info ""
-    info "Differences are only a fault if they are files you have NOT touched"
-    info "since the last backup. Check the timestamps before worrying."
+    info "A file you have edited since the last backup will show here and is"
+    info "not a fault. Anything else is: check the timestamps before deciding."
   fi
   rm -rf "$scratch"
   info "scratch removed"
