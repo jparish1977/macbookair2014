@@ -254,8 +254,6 @@ say "Checks before anything is changed"
 [ -x "$HERE/vm-restore-test.sh" ]  || die "vm-restore-test.sh is not next to this script"
 ok "the scripts this drives are all here"
 
-[ "$CONFIRM" = 1 ] && cmd_confirm_good
-
 # Mains, not battery. A snapshot plus a push is tens of minutes of sustained
 # disk and Wi-Fi on a machine whose battery is eleven years old, and logrotate
 # on this laptop already refuses to run on battery for the same reason.
@@ -267,17 +265,29 @@ ok "on mains"
 
 # Reachable BY TAILNET NAME. The bare `iteration8` alias resolves to a .local
 # address and works only at home, which is a confusing way to fail when away.
-if [ "$DRY" = 0 ]; then
+# --confirm-good --skip-push touches nothing remote, so do not fail it for a
+# network it does not need. Everything else does need iteration8.
+if [ "$CONFIRM" = 1 ] && [ "$SKIP_PUSH" = 1 ]; then
+  info "$REMOTE not needed (--confirm-good --skip-push)"
+elif [ "$DRY" = 0 ]; then
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" true 2>/dev/null \
     || die "cannot reach $REMOTE over ssh. On the tailnet? 'tailscale status'"
+  ok "$REMOTE reachable"
+else
+  ok "$REMOTE reachable"
 fi
-ok "$REMOTE reachable"
 
 if [ "$DRY" = 0 ]; then
   free_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
   [ "${free_gb:-0}" -ge 25 ] || die "only ${free_gb}G free on / -- a snapshot needs ~20G headroom"
   ok "${free_gb}G free on /"
 fi
+
+# Only now. cmd_confirm_good takes a snapshot -- minutes of sustained disk I/O --
+# so it needs the mains and free-space checks every bit as much as a full run
+# does. Dispatching it earlier skipped both, which is how it came to be runnable
+# on battery in a car.
+[ "$CONFIRM" = 1 ] && cmd_confirm_good
 
 # What is even pending? If nothing is, the whole run would end in "the upgrade
 # changed nothing" an hour from now, and it is much kinder to say so up front.
