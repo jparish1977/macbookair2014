@@ -220,7 +220,13 @@ cmd_confirm_good() {
   fi
 
   echo
-  ok "done -- this machine is the new known-good, locally and offsite"
+  if [ "$SKIP_PUSH" = 1 ]; then
+    ok "done -- this machine is the new known-good LOCALLY"
+    info "Not offsite: run './snapshot-offsite.sh push' on mains and a network"
+    info "you do not mind spending, or the disaster-recovery copy stays behind."
+  else
+    ok "done -- this machine is the new known-good, locally and offsite"
+  fi
   info "Prune the older ones when you are ready:  sudo ./system-snapshot.sh prune"
   echo
   exit 0
