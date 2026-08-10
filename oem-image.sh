@@ -147,7 +147,8 @@ vm_boot_headless() {
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file="$VARS" \
     -device ich9-ahci,id=ahci \
-    -drive file="${1:-$DISK}",if=none,id=t0,format=qcow2 -device ide-hd,bus=ahci.0,drive=t0 \
+    -drive file="${1:-$DISK}",if=none,id=t0,format=qcow2,discard=unmap,detect-zeroes=unmap \
+      -device ide-hd,bus=ahci.0,drive=t0 \
     -netdev user,id=n0 -device e1000,netdev=n0 \
     -serial "unix:$SOCK,server,nowait" -display none \
     -pidfile "$PIDF" > "$WORK/oem-qemu.log" 2>&1 &
@@ -449,8 +450,46 @@ systemctl enable oem-firstboot-grow.service 2>&1 | tail -1' 30
   guest_says 'wc -c < /etc/machine-id' 10 '^0$' && ok "machine-id is empty" || warn "machine-id is not empty"
   guest_says 'ls /etc/ssh/ | grep -c ssh_host || true' 10 '^0' && ok "no ssh host keys" || warn "ssh host keys still present"
 
-  say "Tidying"
-  guest 'apt-get clean; rm -rf /var/lib/apt/lists/*; rm -f /var/log/oem-provision.log; journalctl --rotate --vacuum-time=1s >/dev/null 2>&1; echo TID''IED' 60
+  # Tidying, in two parts that are doing genuinely different jobs.
+  #
+  # PART ONE IS NOT ABOUT SIZE. /etc/NetworkManager/system-connections holds the
+  # PSK of every wi-fi network the builder joined, in a file the wizard never
+  # touches. This VM only ever had wired DHCP, so there is nothing to leak here
+  # -- but the whole point of oem-image.sh is that somebody else runs it, and
+  # Jenni installing over her own wi-fi would bake her house password into every
+  # copy of an image meant to be handed out. Same for the installer logs, and for
+  # the shell history of the serial session that provisioned it.
+  say "Tidying: things that should not be handed to a stranger"
+  guest 'rm -f /etc/NetworkManager/system-connections/*; \
+         rm -rf /var/log/installer /var/crash/*; \
+         rm -f /root/.bash_history /home/*/.bash_history; \
+         rm -rf /root/.cache /home/*/.cache/thumbnails; \
+         : > /var/log/wtmp 2>/dev/null; : > /var/log/btmp 2>/dev/null; \
+         echo SCRU''BBED' 60
+  guest_says 'ls -A /etc/NetworkManager/system-connections/ 2>/dev/null | wc -l' 15 '^0$' \
+    && ok "no saved network credentials" || warn "saved network connections remain -- check them"
+
+  say "Tidying: reclaiming space"
+  guest 'apt-get clean; rm -rf /var/lib/apt/lists/*; rm -f /var/log/oem-provision.log; \
+         find /var/log -type f -name "*.log" -exec truncate -s 0 {} + 2>/dev/null; \
+         rm -rf /var/lib/dkms/*/*/build 2>/dev/null; \
+         journalctl --rotate --vacuum-time=1s >/dev/null 2>&1; echo CLEA''NED' 90
+
+  # fstrim is what actually shrinks the artefact. Deleting a file inside the
+  # guest frees nothing in the qcow2 -- the cluster stays allocated and gets
+  # copied forever after. The drive is opened with discard=unmap so TRIM reaches
+  # the image and punches real holes.
+  local before after
+  before=$(du -m "$DISK" | cut -f1)
+  say "Discarding freed blocks"
+  guest 'fstrim -av 2>&1 | head -3' 180
+  sleep 3
+  after=$(du -m "$DISK" | cut -f1)
+  if [ "$after" -lt "$before" ]; then
+    ok "reclaimed $(( (before - after) )) MiB in the image (${before} -> ${after} MiB)"
+  else
+    warn "fstrim freed nothing in the image -- the convert below still compacts it"
+  fi
 
   # oem-config-prepare LAST, and then nothing else. It arms the first-boot
   # wizard; anything done after it risks being what the wizard finds.
@@ -470,10 +509,20 @@ systemctl enable oem-firstboot-grow.service 2>&1 | tail -1' 30
   rm -f "$PIDF"
   ok "powered off cleanly"
 
-  # Seal by rename, so a half-finished run can never be mistaken for a finished
-  # one: oem-sealed.qcow2 exists only if everything above passed.
-  cp --reflink=auto "$DISK" "$SEALED" || die "could not write $SEALED"
-  ok "$(basename "$SEALED") sealed ($(du -h "$SEALED" | cut -f1) of ${OEM_GB}G virtual)"
+  # Sealed as a separate file, so a half-finished run can never be mistaken for a
+  # finished one: oem-sealed.qcow2 exists only if everything above passed.
+  #
+  # convert, not cp. A plain copy carries every cluster the image ever touched,
+  # including the apt cache that was just deleted -- the qcow2 has no idea those
+  # clusters are dead. convert writes only what is live, so the deletions above
+  # turn into an actually smaller artefact rather than a tidier-looking guest.
+  say "Compacting"
+  rm -f "$SEALED"
+  qemu-img convert -O qcow2 "$DISK" "$SEALED" || die "could not write $SEALED"
+  local raw_mb sealed_mb
+  raw_mb=$(du -m "$DISK" | cut -f1); sealed_mb=$(du -m "$SEALED" | cut -f1)
+  ok "$(basename "$SEALED") sealed: $(du -h "$SEALED" | cut -f1) of ${OEM_GB}G virtual"
+  info "compaction saved $(( raw_mb - sealed_mb )) MiB over a straight copy"
   echo
   info "Confirm it before trusting it -- on a COPY, because verifying by booting"
   info "consumes the very wizard you are checking for:"
