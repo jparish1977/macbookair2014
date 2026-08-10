@@ -47,7 +47,14 @@ ARCHIVE_DIR="${MBA_SERVER_ARCHIVE:-$HOME/archive}"
 RESTIC_DIR="${MBA_SERVER_RESTIC:-$HOME/backups/restic}"
 
 PKGS=(qemu-system-x86 qemu-utils ovmf p7zip-full cpio initramfs-tools
-      rsync python3 curl gdisk dosfstools smartmontools sysstat)
+      rsync python3 curl gdisk dosfstools smartmontools sysstat
+      # attr is not optional: snapshot-offsite.sh's status check runs getfattr
+      # ON THE REMOTE to prove the target can hold --fake-super metadata, and
+      # verifying a restored copy means reading those xattrs back. Without it
+      # every check returns nothing and 2>/dev/null makes that look like
+      # missing metadata rather than a missing tool. Found on the test VM,
+      # where it cost twenty minutes of chasing a transfer that was fine.
+      attr)
 
 say()  { echo; echo -e "\033[1;36m==> $*\033[0m"; }
 ok()   { echo -e "    \033[32m[ok]\033[0m   $*"; }
