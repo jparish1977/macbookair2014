@@ -68,21 +68,34 @@ run()   { if doing; then "$@"; else echo "      would run: $*"; fi; }
 backing_dev() { df --output=source "$1" 2>/dev/null | tail -1; }
 
 redundancy_of() {   # $1 = path -> "redundant: raid5" | "single disk" | "unknown"
-  local dev base lvl
+  local dev name cand lvl
   dev=$(backing_dev "$1")
-  base=$(basename "$dev" | sed 's/p\?[0-9]*$//')
-  if [ -r /proc/mdstat ] && grep -q "^$base " /proc/mdstat 2>/dev/null; then
-    lvl=$(awk -v d="$base" '$1==d {for(i=1;i<=NF;i++) if($i ~ /^raid/) print $i}' /proc/mdstat)
-    case "$lvl" in
-      raid1|raid5|raid6|raid10) echo "redundant: $lvl" ;;
-      raid0|linear)             echo "NOT redundant: $lvl" ;;
-      *)                        echo "md, level unknown" ;;
-    esac
-  elif [ -e "/dev/$base" ]; then
-    echo "single disk"
-  else
-    echo "unknown"
-  fi
+  name=$(basename "$dev")
+
+  # Try the device name AS IT IS first, then with a partition suffix removed.
+  # An unpartitioned array is /dev/md0 and a partitioned one is /dev/md0p1, and
+  # stripping digits unconditionally turns "md0" into "md", which matches
+  # nothing. That bug survived because this estate's array happens to be
+  # partitioned -- it took running this on a VM whose RAID was a bare /dev/md0
+  # to show it. Order matters: longest candidate first.
+  for cand in "$name" "${name%p[0-9]}" "${name%%[0-9]}" "$(echo "$name" | sed 's/p[0-9]*$//')"; do
+    [ -n "$cand" ] || continue
+    if [ -r /proc/mdstat ] && grep -q "^$cand " /proc/mdstat 2>/dev/null; then
+      lvl=$(awk -v d="$cand" '$1==d {for(i=1;i<=NF;i++) if($i ~ /^raid/) print $i}' /proc/mdstat)
+      case "$lvl" in
+        raid1|raid5|raid6|raid10) echo "redundant: $lvl" ;;
+        raid0|linear)             echo "NOT redundant: $lvl" ;;
+        *)                        echo "md, level unknown" ;;
+      esac
+      return 0
+    fi
+  done
+
+  case "$dev" in
+    /dev/mapper/*|/dev/dm-*) echo "device-mapper -- check by hand" ;;
+    /dev/*)                  echo "single disk" ;;
+    *)                       echo "unknown" ;;
+  esac
 }
 
 cmd_report() {
@@ -162,7 +175,11 @@ cmd_layout() {
   local snap_store="${MBA_SERVER_SNAP_STORE:-${best:-/srv}/mba-snapshots}"
   info ""
   info "snapshot store   $snap_store"
-  info "  reached as     $SNAP_LINK (symlink, so configs naming the old path still work)"
+  if [ "$snap_store" != "$SNAP_LINK" ]; then
+    info "  reached as     $SNAP_LINK (symlink, so configs naming the old path still work)"
+  else
+    info "  (no symlink needed -- the store is already at the path configs name)"
+  fi
   info "archive          $ARCHIVE_DIR      static, irreplaceable, never versioned"
   info "restic repos     $RESTIC_DIR       one per machine, each with its own passphrase"
   info "VM rig           $VMTEST_DIR       disposable; needs no redundancy, it rebuilds"
