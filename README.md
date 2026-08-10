@@ -24,6 +24,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`server-provision.sh`](#server-provisionsh) | Build the **server** side from nothing on any Debian/Ubuntu host — packages, layout, and which filesystems actually survive a disk |
 | [`preflight.sh`](#preflightsh) | **Test an update before this machine takes it** — snapshot, push, rebuild in a VM, run the real upgrade, report a verdict |
 | [`kernel-guard.sh`](#kernel-guardsh) | Apt hook: warn *before* a reboot that would leave the machine with no Wi-Fi |
 | [`apt-rollback.sh`](#apt-rollbacksh) | Undo a bad apt transaction precisely, from apt's own records |
@@ -1244,6 +1245,45 @@ already established rather than disabling host-key checking, which is the other
 common way to make this symptom disappear. The failure path also prints ssh's own
 words now: **"cannot reach" was a conclusion presented as a diagnosis**, and it
 sent the first investigation at the network, which was never the problem.
+
+## `server-provision.sh`
+
+    ./server-provision.sh              # report only, changes nothing
+    ./server-provision.sh apply
+    ssh somehost 'bash -s' < server-provision.sh
+
+`workshop/provision.sh` already makes the point for the kernel workshop: it is
+not a machine, it is a recipe. The other half of what this project needs from a
+server was never written down — and that half grew to hold the disaster-recovery
+copy, the irreplaceable U810 media, and the encrypted user-data repo. So the
+laptop could be rebuilt in twenty minutes while the machine that makes that
+possible was an afternoon of remembering.
+
+It reports the storage estate and **says which filesystems survive a disk
+failure**, by reading `/proc/mdstat` rather than assuming:
+
+    /        1.6T free   /dev/sdc4    single disk
+    /home     404G free  /dev/md0p1   redundant: raid5
+
+then puts the snapshot store and archives on the redundant filesystem with the
+most room, reached through a symlink so configs naming the old path keep working.
+
+**Redundancy is preferred, not required.** The disaster-recovery copy spent its
+first days on the only disk with no redundancy — the copy that exists *because*
+a disk might die, on a disk whose death would take it. Worth catching. But a
+host may genuinely have one disk, and a copy on a single disk in another
+building still survives the laptop dying, which is the point of it. Compare
+`system-snapshot.sh`, which *does* refuse network targets: that rule is absolute
+for a specific reason. This one is a preference, and preferences advise.
+
+It also flags a large ext4 root reserve — 5% of a 3.6 T array is 186 GB doing
+nothing on a data filesystem — and reports rather than changes it.
+
+**What it deliberately will not do:** ssh keys, tailscale membership, the restic
+passphrase. Those are secrets and access decisions, and a provisioning script
+that invents them is worse than one that lists them and stops. The passphrase in
+particular lives on the *laptop's* keyring — the machine storing the backup
+should not be able to read it.
 
 ## `preflight.sh`
 
