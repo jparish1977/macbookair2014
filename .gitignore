@@ -8,3 +8,6 @@ resume.sh
 
 # Site config: which host holds the offsite copy. Local, not part of the repo.
 .offsite.conf
+
+# Site config for home-backup.sh -- untracked on purpose.
+.home-backup.conf
