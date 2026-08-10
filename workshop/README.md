@@ -285,3 +285,27 @@ du -sh /srv/kernel-workshop/builds/*                # old builds pile up; delete
 
 Re-run `capture-target.sh` on a machine after it takes a distro kernel upgrade,
 or you will be building against a config that no longer matches it.
+
+## NUMA: worth an experiment, not a default
+
+iteration8 is genuinely dual-socket — 2 × Xeon E5-2687W, 8 cores / 16 threads
+each — so `nproc` reports **32 across two NUMA nodes**:
+
+    node0  CPUs 0-7,16-23
+    node1  CPUs 8-15,24-31
+
+A `-j32` build spans both sockets and pays cross-node memory traffic. Confining
+it to one node is worth timing:
+
+    numactl --cpunodebind=0 --membind=0 ./kbuild.sh --jobs 16
+
+Sometimes that beats `-j32`, because the working set stops crossing the
+interconnect. Sometimes it does not. **Measure both on the same tree, more than
+once** — this host's timings vary enough run-to-run that a single comparison
+proves nothing.
+
+Worth contrasting with the VM work in the parent repo, where pinning is *not*
+worth doing: those guests are blocked on 7200rpm disks, and taking one from
+2 vCPU / 4G to 8 vCPU / 16G moved the wall clock by 26 seconds. A kernel build
+is one of the few jobs on this machine that is actually CPU and
+memory-bandwidth bound, which is exactly when NUMA placement starts to matter.

@@ -81,6 +81,12 @@
 set -uo pipefail
 
 WORK="${MBA_VMTEST_DIR:-/srv/mba-vmtest}"
+
+# Site config, untracked, alongside the work dir -- same pattern as
+# .offsite.conf. This is where a host says things only it knows: which disk the
+# carrier should live on, how big to build, how much guest to give a build.
+# shellcheck source=/dev/null
+[ -r "$WORK/.vmtest.conf" ] && . "$WORK/.vmtest.conf"
 SNAPSRC="${MBA_VMTEST_SNAPSRC:-/srv/mba-snapshots}"
 ISO_URL="${MBA_VMTEST_ISO_URL:-https://mirrors.kernel.org/linuxmint/stable/22.3/linuxmint-22.3-xfce-64bit.iso}"
 ISO="$WORK/$(basename "$ISO_URL")"
@@ -134,6 +140,28 @@ BUILD_RAM="${MBA_VMTEST_BUILD_RAM:-16384}"
 # restore fail, so leave headroom.
 TARGET_GB="${MBA_VMTEST_TARGET_GB:-40}"
 CARRIER_GB="${MBA_VMTEST_CARRIER_GB:-30}"
+
+# WHERE THE CARRIER LIVES, AND WHY IT IS WORTH MOVING
+#
+# The restore's long phase (step 6) reads the carrier and writes the target. Put
+# both on one spinning disk and the head thrashes between two 20G files for
+# fifteen minutes; put them on different devices and the read stream and the
+# write stream stop fighting.
+#
+# iteration8 has four 7200rpm disks and no SSD: sdc alone, and sda/sdb/sdd as a
+# RAID5 mounted at /home. The snapshot store moved onto that array, so the
+# arrangement that splits the LONG phase is:
+#
+#   carrier   on the RAID  -> step 6 reads md0 and writes sdc, split
+#   target    on sdc       -> and so is golden, so sealing stays an instant
+#                             rename rather than a 20G cross-filesystem copy
+#
+# Step 4 (the pull) then reads and writes md0, but that is the short phase and a
+# three-spindle RAID5 absorbs concurrent read/write far better than one disk.
+#
+# Default keeps everything together, which is right on a single-disk host. Set
+# MBA_VMTEST_CARRIER to split it.
+CARRIER_IMG="${MBA_VMTEST_CARRIER:-$WORK/carrier.qcow2}"
 
 die()  { echo "error: $*" >&2; exit 1; }
 say()  { echo; echo "  == $*"; }
@@ -215,8 +243,9 @@ cmd_prepare() {
   ok "ISO present ($(du -h "$ISO" | cut -f1))"
 
   qemu-img create -f qcow2 "$WORK/target.qcow2"  "${TARGET_GB}G"  >/dev/null || die
-  qemu-img create -f qcow2 "$WORK/carrier.qcow2" "${CARRIER_GB}G" >/dev/null || die
-  ok "disks: target ${TARGET_GB}G, carrier ${CARRIER_GB}G"
+  mkdir -p "$(dirname "$CARRIER_IMG")" 2>/dev/null
+  qemu-img create -f qcow2 "$CARRIER_IMG" "${CARRIER_GB}G" >/dev/null || die
+  ok "disks: target ${TARGET_GB}G, carrier ${CARRIER_GB}G$([ "$CARRIER_IMG" = "$WORK/carrier.qcow2" ] || echo " at $CARRIER_IMG")"
 
   # Kernel + initrd for direct boot. Direct boot is what lets us pass
   # console=ttyS0 without a boot menu we would need a screen to use.
@@ -391,7 +420,7 @@ cmd_boot() {
     -drive if=pflash,format=raw,file="$WORK/vars.fd" \
     -device ich9-ahci,id=ahci \
     -drive file="$disk",if=none,id=t0,format=qcow2  -device ide-hd,bus=ahci.0,drive=t0 \
-    -drive file="$WORK/carrier.qcow2",if=none,id=c0,format=qcow2 -device ide-hd,bus=ahci.1,drive=c0 \
+    -drive file="$CARRIER_IMG",if=none,id=c0,format=qcow2 -device ide-hd,bus=ahci.1,drive=c0 \
     -drive file="$ISO",if=none,id=cd0,media=cdrom,readonly=on    -device ide-cd,bus=ahci.2,drive=cd0 \
     -kernel "$WORK/bootextract/casper/vmlinuz" -initrd "$WORK/initrd.new" \
     -append "boot=casper console=ttyS0,115200 systemd.unit=multi-user.target ---" \
@@ -862,10 +891,18 @@ cmd_restore() {
     qemu-img create -f qcow2 "$WORK/target.qcow2" "${TARGET_GB}G" >/dev/null || die "cannot create the target disk"
     info "recreated target.qcow2 (${TARGET_GB}G, scratch)"
   fi
-  if [ ! -s "$WORK/carrier.qcow2" ]; then
-    qemu-img create -f qcow2 "$WORK/carrier.qcow2" "${CARRIER_GB}G" >/dev/null || die "cannot create the carrier disk"
-    info "recreated carrier.qcow2 (${CARRIER_GB}G, scratch)"
+  if [ ! -s "$CARRIER_IMG" ]; then
+    mkdir -p "$(dirname "$CARRIER_IMG")" 2>/dev/null
+    qemu-img create -f qcow2 "$CARRIER_IMG" "${CARRIER_GB}G" >/dev/null || die "cannot create the carrier disk"
+    info "recreated the carrier (${CARRIER_GB}G, scratch) at $CARRIER_IMG"
   fi
+  # STOP first. cmd_boot's "already running, reuse it" is only safe when the
+  # running VM is the same KIND -- and it may well be a `bootdisk` instance,
+  # which is a restored system on restrict=on with NO ROUTE TO THE HOST. That
+  # guest answers `id` and looks perfectly up, then cannot reach the rsync
+  # daemon, so the failure surfaces as "could not fetch the driver" instead of
+  # "wrong VM". It cost a measurement run to work that out.
+  cmd_stop >/dev/null 2>&1
   # Not served yet -- see update-test for why. The daemon is needed for a few
   # seconds during the fetch, and starting it before a ~90s boot leaves a long
   # window for something to take it away again.
@@ -2018,6 +2055,7 @@ cmd_status() {
   [ -d "$WORK" ] || { info "not prepared yet"; echo; return 0; }
   local f
   [ -s "$WORK/golden.snapshot" ] && printf '  %-28s %s\n' "golden built from" "$(cat "$WORK/golden.snapshot")"
+  [ "$CARRIER_IMG" = "$WORK/carrier.qcow2" ] || printf '  %-28s %s\n' "carrier (split off)" "$CARRIER_IMG"
   for f in "$(basename "$ISO")" initrd.new target.qcow2 carrier.qcow2 golden.qcow2 testbase.qcow2; do
     [ -e "$WORK/$f" ] && printf '  %-28s %s\n' "$f" "$(du -h "$WORK/$f" | cut -f1)" \
                       || printf '  %-28s %s\n' "$f" "missing"
@@ -2051,7 +2089,7 @@ cmd_stop() {
 
 cmd_clean() {
   cmd_stop
-  rm -f "$WORK/target.qcow2" "$WORK/carrier.qcow2" "$WORK/vars.fd"
+  rm -f "$WORK/target.qcow2" "$CARRIER_IMG" "$WORK/vars.fd"
   ok "deleted the working disks. ISO and patched initrd kept -- 'prepare' is quick now."
   # golden.qcow2 is the expensive artefact -- an hour of restore -- and it is
   # what anything downstream boots from. Deleting it here would make `clean`

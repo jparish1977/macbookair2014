@@ -30,6 +30,29 @@ REF=""
 TRIM=1
 HERE=0
 JOBS=$(nproc)
+
+# NUMA, and an experiment worth running before you assume more jobs is faster.
+#
+# iteration8 is genuinely dual-socket: 2 x Xeon E5-2687W, 8c/16t each, so
+# nproc reports 32 across TWO NUMA nodes (node0 = CPUs 0-7,16-23, node1 =
+# 8-15,24-31). A -j32 build spans both sockets and pays cross-node memory
+# traffic for it.
+#
+# A kernel build is one of the few things on this host that is genuinely CPU and
+# memory-bandwidth bound rather than waiting on the disks, so unlike the VM work
+# -- where pinning is pointless, because 2->8 vCPU and 4->16G moved the wall
+# clock by 26 seconds against spinning rust -- confining it to one node can
+# actually win:
+#
+#     numactl --cpunodebind=0 --membind=0 ./kbuild.sh --jobs 16
+#
+# Sometimes faster than -j32 across both sockets, because the working set fits
+# in one node and stops crossing the interconnect. Sometimes not. MEASURE IT
+# rather than assuming, and measure it more than once -- this host's timings
+# vary a lot run to run.
+#
+# Not the default, because it halves the machine and the honest answer is
+# unknown until somebody times both on the same tree.
 KEEP_DEBUG=0
 
 die() { echo "error: $*" >&2; exit 1; }
