@@ -24,6 +24,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 
 | | |
 | --- | --- |
+| [`oem-image.sh`](#oem-imagesh) | Build a handout image: Mint + these fixes, first boot asks for an account |
 | [`machine-provision.sh`](#machine-provisionsh) | A fresh Mint install on a MacBookAir6,x → a working machine, in the right order |
 | [`lint.sh`](#lintsh) | Check this repo for the traps it has actually been bitten by |
 | [`home-backup.sh`](#home-backupsh) | The live user data — encrypted, versioned, restore-tested. Thin wrapper over stock restic |
@@ -1281,6 +1282,55 @@ Finding it clean means nothing unless it can fail, so that was tested by
 reintroducing the bug in a scratch file and confirming it was caught. It found
 **five latent instances** in scripts untouched that day — `fix-camera.sh`,
 `crash-report.sh`, `optimize-mba.sh` — which are now fixed.
+
+## `oem-image.sh`
+
+    ./oem-image.sh install     # create the disk, boot the ISO -- the one manual step
+    ./oem-image.sh wire        # add a serial console, offline
+    ./oem-image.sh provision   # apply the fixes, unattended
+    ./oem-image.sh seal        # strip the rig, clear identity, arm the wizard
+    ./oem-image.sh verify      # boot a THROWAWAY COPY and check
+
+Produces a qcow2 whose first boot shows **"create your account"**, not a login
+prompt. Write it to a USB stick and somebody boots a working Mac-on-Linux
+without installing anything; write it to an internal disk and it is a
+refurbished machine. One artefact for both, because a 20 GiB image grows to fill
+whatever it lands on.
+
+It starts from **stock Mint media, never a snapshot** — restoring one person's
+system onto another person's machine is the thing this project has a standing
+rule against, and it is also why nothing here needs the identity scrubbing a
+clone would: there is no identity yet.
+
+**Only one step is interactive**, and that is a deliberate design result rather
+than a limit. Two facts made it possible:
+
+The ISO already carries an **`OEM install (for manufacturers)`** boot entry that
+passes `oem-config/enable=true`, so Mint arms its own first-boot wizard — none of
+that had to be rebuilt. `wire` checks `oem-config` really is installed and
+**refuses to continue if it is not**, because an install driven through the
+normal entry works right up until you hand somebody a stick that asks for a
+password only you know.
+
+And the phases after the installer are scripted over a **serial console added
+offline**, with the disk on nbd and nothing running. The obvious alternative —
+install `openssh-server` and drop a key in — puts a package the image does not
+need and an authorised key belonging to whoever built it into something meant to
+be handed out. What `wire` adds instead is two files, and `seal` deletes them.
+
+`seal` clears `/etc/machine-id` and the SSH host keys. Skip that and every stick
+and every refurbished machine shares one identity — the same clone problem this
+project already hit once with a tailnet node key, except baked in at manufacture.
+`machine-id` is **truncated, not deleted**: systemd treats an empty file as
+first-boot, a missing one as an error.
+
+`verify` boots a **throwaway overlay**, never the sealed image, because
+`oem-config` runs once and removes its own flag — checking by booting would
+consume the very wizard being checked for, and hand out a stick that goes
+straight to a login prompt.
+
+Then `./vm-restore-test.sh usb-image oem-sealed.qcow2` rewrites its UUIDs so it
+cannot fight an internal disk.
 
 ## `machine-provision.sh`
 
