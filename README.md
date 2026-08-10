@@ -1981,8 +1981,8 @@ Those UUIDs exist nowhere but the snapshot once the disk is gone, so
 `snapshot-offsite.sh disk-plan` reads them out of its fstab and prints the exact
 commands:
 
-    sudo mkfs.ext4 -U b96739a5-34c1-403b-b440-80df9aa71a03 /dev/sdXN   # /
-    sudo mkfs.vfat -F32 -i 1AE41280 /dev/sdXN                          # /boot/efi
+    sudo mkfs.ext4 -U <the root UUID it read from the snapshot> /dev/sdXN   # /
+    sudo mkfs.vfat -F32 -i <the ESP volume id> /dev/sdXN                    # /boot/efi
 
 **Never do this to a disk that will sit alongside the original.** Two filesystems
 with one UUID make `blkid` ambiguous and mounts non-deterministic — you can boot

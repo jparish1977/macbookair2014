@@ -1919,6 +1919,18 @@ cmd_usb_image() {
   sudo sgdisk -G "$dev" >/dev/null || die "sgdisk could not regenerate the GPT GUIDs"
   sudo partprobe "$dev" 2>/dev/null; sudo udevadm settle 2>/dev/null; sleep 2
 
+  # Read the ORIGINAL root UUID out of the image before replacing it. The first
+  # version of this compared against the UUID of the machine it was written on,
+  # baked in as a literal -- which made the safety check below a no-op anywhere
+  # else: on any other laptop the original UUID is different, the grep finds
+  # nothing, and the disk is pronounced safe without anything having been
+  # checked. A check that passes because it is looking for the wrong string is
+  # worse than no check, and it is the same failure this project keeps finding:
+  # something reporting success it has not earned.
+  local oldroot; oldroot=$(sudo blkid -o value -s UUID "${dev}p2")
+  [ -n "$oldroot" ] || die "could not read the image's current root UUID"
+  info "was       $oldroot"
+
   local newroot; newroot=$(uuidgen)
   sudo e2fsck -fy "${dev}p2" >/dev/null 2>&1   # tune2fs -U refuses on an unchecked fs
   sudo tune2fs -U "$newroot" "${dev}p2" >/dev/null || die "could not set a new root UUID"
@@ -1949,7 +1961,7 @@ cmd_usb_image() {
   # must not, or this disk will still reach for the internal root.
   local n_new n_old
   n_new=$(sudo grep -c "$newroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
-  n_old=$(sudo grep -c "b96739a5-34c1-403b-b440-80df9aa71a03" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
+  n_old=$(sudo grep -c "$oldroot" "$mnt/boot/grub/grub.cfg" 2>/dev/null || echo 0)
   [ "$n_new" -gt 0 ] || die "grub.cfg does not reference the new root UUID"
   if [ "$n_old" -gt 0 ]; then
     bad "grub.cfg still references the ORIGINAL root UUID in $n_old place(s)"
