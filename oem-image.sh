@@ -360,7 +360,12 @@ cmd_provision() {
   ( cd "$WORK" && exec python3 -m http.server 8099 --bind 0.0.0.0 >/dev/null 2>&1 ) &
   local srv=$!
   sleep 2
-  guest 'mkdir -p /opt/mba && cd /opt/mba && curl -sS -o p.tgz http://10.0.2.2:8099/oem-payload.tar.gz && tar xzf p.tgz && chmod +x *.sh && echo FE''TCHED' 30
+  # rm -rf FIRST. Extracting over the top leaves whatever a PREVIOUS provision
+  # put there, and the toolkit is copied from this directory -- so a script that
+  # has since been removed from the payload still ships. Found the hard way:
+  # deleting two build drivers from the repo did nothing, because the guest's
+  # /opt/mba still held the copies extracted on the run before.
+  guest 'rm -rf /opt/mba && mkdir -p /opt/mba && cd /opt/mba && curl -sS -o p.tgz http://10.0.2.2:8099/oem-payload.tar.gz && tar xzf p.tgz && chmod +x *.sh && echo FE''TCHED' 30
   [ "$have_fw" = 1 ] && guest 'curl -sS -o /opt/mba/firmware.bin http://10.0.2.2:8099/oem-firmware.bin; echo rc=$?' 60
   kill "$srv" 2>/dev/null
   rm -f "$WORK/oem-firmware.bin"
@@ -479,10 +484,25 @@ PYEOF
   # This runs BEFORE the checks below. It used to run after them, so a fresh
   # provision reported "toolkit installed" MISSING and then installed it -- a
   # red verdict on work the same function was about to do.
+  # run.sh is on that list because THIS SCRIPT WRITES IT, into the same /opt/mba
+  # the toolkit is copied from. It is the unattended provisioning runner, it is
+  # meaningless on the finished machine, and it shipped in the first build that
+  # had a toolkit at all.
+  #
+  # The wider trap: the payload is `ls *.sh` of MBA_OEM_REPO, so ANY stray script
+  # in that directory is handed to whoever receives the machine. Point it at a
+  # clean checkout, never at the work directory -- which also collects
+  # guest-restore.sh, guest-update.sh and measure.sh at runtime.
   say "Installing the toolkit"
-  guest 'install -d /opt/macbookair2014 && cp /opt/mba/*.sh /opt/macbookair2014/ \
+  # rm -rf the DESTINATION too, not just the source. Clearing /opt/mba was not
+  # enough: /opt/macbookair2014 kept the copies made by the PREVIOUS build, so
+  # scripts removed from the payload still shipped. Same bug as the source
+  # directory, one level further down, and it survived a whole rebuild because
+  # the fix looked obviously sufficient.
+  guest 'rm -rf /opt/macbookair2014 && install -d /opt/macbookair2014 && cp /opt/mba/*.sh /opt/macbookair2014/ \
          && chmod +x /opt/macbookair2014/*.sh \
          && rm -f /opt/macbookair2014/oem-image.sh /opt/macbookair2014/vm-restore-test.sh \
+                  /opt/macbookair2014/run.sh \
          && install -d /etc/skel \
          && ln -sfn /opt/macbookair2014 /etc/skel/macbookair2014; echo rc=$?' 30
   guest 'ls /opt/macbookair2014/ | wc -l; ls -l /etc/skel/macbookair2014 | tail -1' 20 | sed 's/^/      /'
@@ -521,6 +541,13 @@ PYEOF
   chk "toolkit installed"   'test -x /opt/macbookair2014/mba-wifi.sh'
   chk "toolkit in skel"     'test -L /etc/skel/macbookair2014'
   chk "ubiquity crash guard" 'grep -q "prop = self.proxy.get_cached_property" /usr/lib/ubiquity/ubiquity/misc.py'
+  # The toolkit is what the recipient gets. Nothing that built the image belongs
+  # in it, and twice now something has: run.sh because provision writes it into
+  # the directory the toolkit is copied from, and two drivers because they were
+  # parked in the payload directory and then survived in the guest across a
+  # rebuild. Both were found by mounting the finished image, not by any check.
+  chk "no build scripts in toolkit" \
+      '! ls /opt/macbookair2014 | grep -qE "^(run|rebuild|unarm|finish|inspect|oem-image|vm-restore-test|guest-.*|measure)\.sh$"'
   echo
   if [ "$f" = 0 ]; then ok "$n/$n present"; else bad "$f of $((n + f)) missing"; fi
 
@@ -529,8 +556,18 @@ PYEOF
   info "BCM4360, no FaceTime HD and no Apple SMC in this VM. That is what booting"
   info "the finished image on the real laptop is for."
   echo
-  [ "$f" = 0 ] && info "Next:  ./oem-image.sh seal" \
-               || warn "Fix the failures above before sealing."
+  # EXIT NON-ZERO when a check failed. This used to only warn, so a scripted
+  # run -- wire, provision, seal, verify, usb-image chained by &&  -- sailed
+  # straight past a red check and sealed the image anyway. It did exactly that:
+  # "FAIL no build scripts in toolkit" was printed, and eleven minutes later the
+  # same run reported "VERDICT: the sealed image is intact and armed". Both
+  # statements were true and the combination was worthless.
+  if [ "$f" = 0 ]; then
+    info "Next:  ./oem-image.sh seal"
+  else
+    warn "Fix the failures above before sealing."
+    return 1
+  fi
 }
 
 # ---- seal --------------------------------------------------------------------

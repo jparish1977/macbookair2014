@@ -2008,8 +2008,21 @@ X
   # boot entries for foreign media.
   # --no-nvram because a chroot has no efivarfs, and writing the BUILD HOST's
   # boot order would be the wrong thing to do even if it did.
+  # TWICE, and the order matters less than the fact that it is two calls.
+  #
+  # --removable forces the bootloader id to BOOT, so that invocation writes
+  # EFI/BOOT/{BOOTX64.EFI,grub.cfg} and NEVER TOUCHES EFI/ubuntu/grub.cfg. The
+  # first attempt at this fix used only --removable, and the check below caught
+  # it: the stub still named the pre-copy UUID.
+  #
+  # EFI/ubuntu is the one that decides. The prefix is compiled into Ubuntu's
+  # SIGNED grubx64.efi and always reads /EFI/ubuntu, whichever path the firmware
+  # loaded. So the plain call refreshes the config that gets used, and the
+  # --removable call refreshes the binary a Mac's Option-key picker can find.
   sudo chroot "$mnt" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
-       --bootloader-id=ubuntu --removable --no-nvram --recheck 2>&1 | sed 's/^/    /'
+       --bootloader-id=ubuntu --no-nvram --recheck 2>&1 | sed 's/^/    /'
+  sudo chroot "$mnt" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+       --removable --no-nvram --recheck 2>&1 | sed 's/^/    /'
 
   # The ESP gets the same treatment as grub.cfg: checked, not hoped for. The
   # old check looked only at the root filesystem, which is precisely why it
