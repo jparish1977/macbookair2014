@@ -48,6 +48,7 @@ Scripts for running Linux Mint 22.x / Ubuntu 24.04 on a 2014 MacBook Air
 | [`crash-report.sh`](#crash-reportsh) | Read apport `.crash` files without the GUI |
 | [`module-patch-test.sh`](#module-patch-testsh) | Test a kernel module patch on the machine that has the bug, with a control |
 | `applesmc-patch-test.sh` | The purpose-built ancestor of the above; kept as the worked example |
+| `keyring-list.sh` | List what is in the login keyring — labels and lookup attributes, never the secrets. `secret-tool` can only *look up* what you already know the attributes for, and Seahorse 43 does not show these items on a Cinnamon session, so a stored passphrase can look missing when it is not |
 
 **Building kernels**
 
