@@ -39,7 +39,7 @@ run() {
 signal_meaning() {
   case "${1:-}" in
     4)  echo "illegal instruction" ;;
-    6)  echo "abort, usually a failed internal assertion" ;;
+    6)  echo "abort, from a failed assertion or another fatal path" ;;
     7)  echo "bad memory alignment or bad hardware access" ;;
     8)  echo "arithmetic fault" ;;
     11) echo "segfault, invalid memory access" ;;
@@ -93,6 +93,52 @@ field_decoded() {
 
 readable() { [ -r "$1" ]; }
 
+# apport keeps ONE report per program: every crash after the first is dropped
+# with "already exists and unseen, skipping to avoid disk usage DoS". So a
+# .crash file cannot tell you how many times the thing actually crashed — that
+# count exists only in apport's own log. It matters. One abort is a curiosity;
+# two aborts seven seconds apart is a retry loop, and says the first crash did
+# not stop whatever was driving it.
+crash_history() {
+  local f="$1" exe="$2"
+  [ -n "$exe" ] || return 0
+  [ -r /var/log/apport.log ] || return 0
+
+  # One glob, and zcat -f, so the rotated .gz and the plain files are read
+  # alike. Two globs would double-count apport.log.2.gz.
+  local all; all=$(zcat -f /var/log/apport.log* 2>/dev/null || true)
+  [ -n "$all" ] || return 0
+
+  # The trailing space keeps this on the path and off the "(command line ...)".
+  local seen; seen=$(grep -F "executable: $exe " <<< "$all" || true)
+  [ -n "$seen" ] || return 0
+
+  local n; n=$(grep -c . <<< "$seen")
+  # Sorted, not head/tail: the glob yields apport.log before apport.log.1, which
+  # is newest-first, so the file order is not time order. Lexical sort is right
+  # for "YYYY-MM-DD HH:MM:SS".
+  local stamps; stamps=$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' <<< "$seen" | sort)
+
+  info ""
+  if [ "$n" -le 1 ]; then
+    info "apport log  1 crash of this program on record ($(head -1 <<< "$stamps"))"
+    return 0
+  fi
+  info "apport log  $n crashes of this program on record,"
+  info "            $(head -1 <<< "$stamps")  ..  $(tail -1 <<< "$stamps")"
+  # Drops are logged against the report FILENAME, and one program crashing under
+  # two users writes two of them — foo.0.crash and foo.1000.crash. Matching this
+  # one file would silently miss every crash dropped against the other name,
+  # which is exactly the case here: gufw's root abort and yours share a program
+  # but not a report. Match the stem, so the count means "crashes of this
+  # program that left no report" rather than "...that collided with this file".
+  local stem; stem=$(basename "$f"); stem=${stem%.crash}; stem=${stem%.*}
+  local dropped; dropped=$(grep -F 'already exists' <<< "$all" | grep -cF "/$stem." || true)
+  [ "${dropped:-0}" -gt 0 ] && \
+    info "            $dropped of them left no report — apport keeps the first per user"
+  return 0
+}
+
 list_crashes() {
   say "Queued crash reports in $CRASH_DIR"
   local found=0 f
@@ -134,10 +180,47 @@ summarise_one() {
   date=$(field_body "$f" Date | head -1)
   cmd=$(field_body "$f" ProcCmdline | head -1)
 
+  # apport encodes the crashing uid in the filename: foo.0.crash is root's,
+  # foo.1000.crash is yours. Not a detail — a helper that aborts only under root
+  # is usually one hitting a cold cache in an empty /root, which is a different
+  # fault from the same helper aborting inside your session.
+  local uid; uid=$(basename "$f"); uid=${uid%.crash}; uid=${uid##*.}
+  case "$uid" in
+    0)      info "crashed as  root (uid 0)" ;;
+    [0-9]*) info "crashed as  $(id -nu "$uid" 2>/dev/null || echo "uid $uid")" ;;
+  esac
+
   [ -n "$exe" ]  && info "executable  $exe"
+  # Plenty of reports carry no Package field at all, and then the "no longer
+  # installed" check below silently does nothing and looks like a pass. Ask dpkg
+  # who owns the binary instead.
+  if [ -z "$pkg" ] && [ -n "$exe" ]; then
+    pkg=$(dpkg -S "$exe" 2>/dev/null | head -1 | cut -d: -f1)
+    [ -n "$pkg" ] && pkg="$pkg  (from dpkg -S — the report has no Package field)"
+  fi
   [ -n "$pkg" ]  && info "package     $pkg"
   [ -n "$date" ] && info "when        $date"
-  [ -n "$cmd" ]  && info "cmdline     $(printf '%s' "$cmd" | cut -c1-100)"
+  # Wrapped, not truncated. In a helper-process crash the decisive clue is
+  # usually the TAIL of argv — gst-plugin-scanner's "-l .../WebKitNetworkProcess"
+  # named the parent application, and sat past character 100 of a cut -c1-100.
+  if [ -n "$cmd" ]; then
+    local first=1 line
+    while IFS= read -r line; do
+      if [ "$first" -eq 1 ]; then info "cmdline     $line"; first=0
+      else                        info "            $line"; fi
+    done < <(printf '%s\n' "$cmd" | fold -s -w 62)
+  fi
+
+  # Pid and parent pid are how you tie the crash back to an application: syslog
+  # and dbus-daemon lines carry pids, so grepping these two numbers in
+  # /var/log/syslog is usually what names whatever spawned a helper like this.
+  local cpid ppid status
+  status=$(field_body "$f" ProcStatus)
+  cpid=$(awk '$1=="Pid:"{print $2; exit}'  <<< "$status")
+  ppid=$(awk '$1=="PPid:"{print $2; exit}' <<< "$status")
+  if [ -n "$cpid" ] || [ -n "$ppid" ]; then
+    info "pid         ${cpid:-?} (parent ${ppid:-?}) — grep both in /var/log/syslog"
+  fi
   # apport usually records SignalName too; prefer it over guessing from the
   # number, and fall back to the table when it is absent.
   local signame; signame=$(field_body "$f" SignalName | head -1)
@@ -149,6 +232,31 @@ summarise_one() {
       info "signal      $sig — $(signal_meaning "$sig")"
     fi
   fi
+
+  # When apport catches the assertion text, it is usually the entire answer —
+  # file, line and condition, no retracing required.
+  local am; am=$(field_decoded "$f" AssertionMessage)
+  if [ -n "$am" ]; then
+    info ""
+    info "assertion:"
+    printf '%s\n' "$am" | head -4 | cut -c1-150 | sed 's/^/      /'
+  elif [ "$sig" = "6" ]; then
+    # An abort with no AssertionMessage looks like a dead end and is not one --
+    # but do not promise it is an assert, because signal 6 only ever means
+    # "something reached abort()". This machine has produced both kinds: the
+    # gst-plugin-scanner abort WAS a failed assert whose message went to stderr,
+    # while the Xorg one was FatalError -> OsAbort -> abort after a fatal signal
+    # arrived inside modesetting_drv.so, where re-running it prints nothing.
+    info ""
+    info "no assertion text. Signal 6 only means something reached abort():"
+    info "a failed assert, a fortify or malloc check, an uncaught C++"
+    info "exception, a fatal-error handler (Xorg's does this), or a SIGABRT"
+    info "sent from outside. If it was an assert, the message went to stderr,"
+    info "which apport does not capture from a crashed child — re-running the"
+    info "program in a terminal prints it, faster than retracing the core."
+  fi
+
+  crash_history "$f" "$exe"
 
   # Is the crashing package even installed any more? A report for something you
   # have since removed or replaced is not worth reading.

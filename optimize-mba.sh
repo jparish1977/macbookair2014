@@ -179,6 +179,36 @@ say "7/8  Disabling hardware you don't have"
 systemctl disable --now ModemManager.service >/dev/null 2>&1 && ok "ModemManager off (no cellular modem)"
 systemctl mask casper.service casper-md5check.service >/dev/null 2>&1 && ok "casper masked (live-USB leftover; this was your failed unit)"
 
+# GStreamer's Intel Media SDK plugin. libmfx has no Haswell path, so it falls
+# through to the legacy i965 VA-API driver, asks for a surface format that
+# driver cannot allocate, and i965 answers with assert() instead of an error
+# return -- taking the whole plugin scanner process down with it:
+#
+#   gst-plugin-scanner: i965_drv_video.c:4653: i965_check_alloc_surface_bo:
+#     Assertion `subsampling == SUBSAMPLE_YUV420 || ...' failed.
+#
+# GStreamer itself survives this -- the plugin is blacklisted and the scan
+# finishes -- so nothing looks broken. The cost is a 24MB apport report and a
+# mintreport popup every time a registry is built from cold, and cold builds are
+# not rare: any GUI app run as root starts with an empty /root/.cache. Media SDK
+# needs Skylake or newer, so there is nothing here to lose on a Haswell Air.
+#
+# Diverted rather than deleted, so an upgrade of gstreamer1.0-plugins-bad does
+# not quietly put it back.
+MSDK=/usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstmsdk.so
+# Captured, not piped: dpkg-divert --list writes a line and grep -q exits on it,
+# SIGPIPEing dpkg-divert, which under pipefail reads as "not diverted" and would
+# make this step run again on every invocation. See lint.sh.
+DIVERTED=$(dpkg-divert --list "$MSDK" 2>/dev/null)
+if grep -q . <<< "$DIVERTED"; then
+  ok "gstreamer msdk plugin already diverted"
+elif [ -e "$MSDK" ]; then
+  dpkg-divert --add --rename --divert "$MSDK.disabled" "$MSDK" >/dev/null 2>&1 \
+    && ok "gstreamer msdk plugin diverted (aborts the plugin scanner on i965; Media SDK is Skylake+)"
+else
+  ok "gstreamer msdk plugin not installed, nothing to divert"
+fi
+
 # ---------------------------------------------------------------- 8. MYSQL
 say "8/8  Tuning MySQL 8 for 4GB (kept running - it's your toolchain)"
 cat > /etc/mysql/mysql.conf.d/zz-lowmem.cnf <<'EOF'

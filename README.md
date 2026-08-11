@@ -481,10 +481,86 @@ sudo ./crash-report.sh show       # summarise each one, decoded
 sudo ./crash-report.sh clear      # delete them, asks first — stops the popup
 ```
 
-It decodes those fields, prints the signal with its meaning (`6` is an abort
-from a failed internal assertion, `11` a segfault — a distinction that changes
-where to look), pulls the `(EE)` lines out of an Xorg log, and reports which
-video driver was actually *loaded* rather than merely probed.
+It decodes those fields, prints the signal with its meaning (`6` an abort, `11`
+a segfault — a distinction that changes where to look, with a caveat about `6`
+below), pulls the `(EE)` lines out of an Xorg log, and reports which video
+driver was actually *loaded* rather than merely probed.
+
+It also prints, all of which came out of the `gst-plugin-scanner` crash below:
+
+- **which user crashed.** apport encodes the uid in the filename — `foo.0.crash`
+  is root's, `foo.1000.crash` is yours. A helper that only aborts under root is
+  usually one hitting a cold cache in an empty `/root`, which is a different
+  fault from the same helper aborting in your session.
+- **the full command line**, wrapped rather than cut at 100 characters. In a
+  helper-process crash the decisive clue is usually the *tail* of argv:
+  `gst-plugin-scanner -l …/WebKitNetworkProcess` names the parent application,
+  and it sat past the old truncation point.
+- **pid and parent pid**, because syslog and `dbus-daemon` lines carry pids, and
+  grepping those two numbers is what actually names the application involved.
+- **the owning package from `dpkg -S`** when the report has no `Package` field.
+  Without that fallback the "no longer installed" check silently does nothing
+  and reads as a pass.
+- **how many times it really crashed.** apport keeps one report per program and
+  drops the rest with *"already exists and unseen, skipping to avoid disk usage
+  DoS"*, so the count lives only in `/var/log/apport.log`. One abort is a
+  curiosity; two seven seconds apart is a retry loop, and says the first crash
+  did not stop whatever was driving it.
+
+### An abort with no assertion text is not a dead end
+
+`Signal: 6` and no `AssertionMessage` looks like the report has nothing in it.
+Often it hasn't lost the message — it never had it: glibc's `assert()` writes to
+stderr, and apport does not capture a crashed *child's* stderr. The text is
+still in the world, it just needs the program run again in a terminal, which
+takes seconds and beats retracing a 24MB core.
+
+The script says that now instead of sending you straight to `apport-retrace`,
+but it stops short of claiming an assert failed, because signal 6 only ever
+means *something reached `abort()`*. This machine has produced both kinds: the
+`gst-plugin-scanner` abort was a real failed assert, while the Xorg one below
+was `FatalError → OsAbort → abort` after a fatal signal arrived inside
+`modesetting_drv.so` — and re-running Xorg would have printed nothing.
+
+### The `gst-plugin-scanner` crash: an assert in a VA-API driver
+
+2026-08-11, 24MB, root-owned, `SIGABRT`. The report itself had no `Package`, no
+`StacktraceTop` and no `AssertionMessage` — `ExecutablePath`, `Signal` and argv
+were the whole of it. The chain came from `/var/log/apport.log` plus syslog:
+
+    05:08:44  gufw started as root (pkexec)  -> gufw embeds webkit2gtk-4.1
+    05:08:45  root WebKitWebProcess appears
+    05:08:47  gst-plugin-scanner -l .../WebKitNetworkProcess   SIGABRT
+    05:08:54  ...and again, second report dropped as "already exists"
+
+WebKit initialises GStreamer; root's `/root/.cache/gstreamer-1.0` was empty, so
+it built a registry from cold. Reproducing that cold build as an ordinary user
+printed the answer on the first try:
+
+```sh
+$ GST_REGISTRY=$PWD/reg.bin gst-inspect-1.0
+** CRITICAL **: _dma_fmt_to_dma_drm_fmts: assertion 'fmt != GST_VIDEO_FORMAT_UNKNOWN' failed
+gst-plugin-scanner: i965_drv_video.c:4653: i965_check_alloc_surface_bo:
+  Assertion `subsampling == SUBSAMPLE_YUV420 || ... || subsampling == SUBSAMPLE_RGBX' failed.
+```
+
+One plugin, confirmed by loading it alone: `libgstmsdk.so`, the Intel **Media
+SDK** plugin from `gstreamer1.0-plugins-bad`. It pulls in `libmfx1`, which
+dispatches to VA-API; `iHD_drv_video.so` fails to initialise on this GPU, so
+libva falls back to `i965_drv_video.so` — `vainfo` confirms *Intel i965 driver
+for Intel(R) Haswell Mobile*. msdk asks it for a surface format it cannot
+allocate and i965 answers with `assert()` rather than an error return.
+
+**Nothing is broken.** The scan completes: `275 plugins (1 blacklist entry not
+shown)`, the blacklisted entry being msdk. GStreamer notes the plugin killed the
+scanner and carries on. The cost is a 24MB report and a popup on every cold
+registry build — and cold builds are not rare, because any GUI app run as root
+starts with an empty `/root/.cache`. `optimize-mba.sh` now diverts the plugin;
+Media SDK needs Skylake or newer, so there is nothing to lose on Haswell.
+
+Reproducing it is not free: each cold scan aborts twice and apport files another
+24MB report, one of them attributed to `gst-inspect-1.0` itself when the plugin
+is loaded with `GST_REGISTRY_FORK=no`. Clear `/var/crash` afterwards.
 
 The most useful line it prints is often this one:
 
@@ -589,6 +665,27 @@ none. If there is no terminal to prompt on, it skips the step entirely.
 Keep at least one known-good kernel. On these machines the previous kernel is
 the recovery path: if a DKMS rebuild of `wl` fails, the older kernel is the only
 way back to a working Wi-Fi card, and there is no Ethernet port to fall back on.
+
+### Absent hardware
+
+`ModemManager` (no cellular modem) and `casper` (a live-USB leftover, and the
+machine's only failed unit) are disabled, plus one that is absent hardware in a
+less obvious sense: GStreamer's Intel **Media SDK** plugin, `libgstmsdk.so`.
+
+Media SDK starts at Skylake. On Haswell `libmfx` falls through to the legacy
+`i965` VA-API driver, asks for a surface format it cannot allocate, and i965
+answers with `assert()` — which aborts the whole `gst-plugin-scanner` process.
+GStreamer survives (the plugin is blacklisted, the scan finishes), so nothing
+looks wrong; the cost is a 24MB apport report and a `mintreport` popup on every
+cold registry build. The full diagnosis is under
+[`crash-report.sh`](#the-gst-plugin-scanner-crash-an-assert-in-a-va-api-driver).
+
+It is a `dpkg-divert`, not an `rm`, so an upgrade of `gstreamer1.0-plugins-bad`
+cannot quietly put it back. To undo:
+
+```sh
+sudo dpkg-divert --remove --rename /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstmsdk.so
+```
 
 ### Known rough edges
 
