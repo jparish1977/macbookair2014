@@ -646,8 +646,23 @@ snapshots, enable zram, tune VM sysctls for zram, install earlyoom, set
 `noatime` on root, disable absent hardware, shrink the MySQL 8 footprint.
 
 ```sh
-sudo ./optimize-mba.sh
+sudo ./optimize-mba.sh              # everything, in order, then verify
+sudo ./optimize-mba.sh services     # just one section
+sudo ./optimize-mba.sh 7            # ...same one, by number
+     ./optimize-mba.sh --list       # the section table, no root needed
 ```
+
+Sections run individually because most of this is one-time and hard to walk
+back — clearing the apt cache, deleting snapshots, purging kernels — while a
+couple are worth re-running alone. `services` is the one that matters: a
+reinstall of `gstreamer1.0-plugins-bad` is the single thing that undoes the msdk
+divert, and re-running the whole script to restore it would clear your apt cache
+and restart MySQL as a side effect.
+
+Selection always runs in canonical order however you type it, since zram has to
+exist before the sysctls that assume it. A partial run prints no verification
+pass — that pass reports the whole machine's state, which after one section
+would be describing things that did not run.
 
 The largest win is zram: zstd averages ~3:1, so a 3.8G zram device holds roughly
 3.8G of pages in ~1.3G of real RAM. `vm.swappiness` is set *high* (180) on
