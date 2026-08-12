@@ -628,23 +628,54 @@ cmd_seal() {
   # wastes 108 GB. cloud-init is not present on a desktop install, so this is a
   # one-shot unit that disables itself -- deliberately NOT tied to oem-config, so
   # it also works when the image is written straight to an internal disk.
+  #
+  # The first version of this shipped a stick that never grew, and the way it
+  # failed is worth keeping:
+  #
+  #   * DefaultDependencies=no strips the ordering that waits for /tmp, and
+  #     growpart takes its flock through a mktemp dir. It logged "cannot create
+  #     /tmp/growpart.XXXX/flock.err: Directory nonexistent" and gave up. Hence
+  #     TMPDIR=/run, which exists before any filesystem is mounted.
+  #
+  #   * Both commands ended in `|| true`, so that failure was swallowed and the
+  #     `touch` ran anyway. The unit logged "Finished", the stamp went into the
+  #     image, and every later boot skipped the unit on its own ConditionPath.
+  #     A one-shot that stamps itself done regardless of outcome is not a
+  #     one-shot, it is a single chance to fail silently.
+  #
+  # So the stamp is now gated on the exit code. growpart inverts the usual
+  # convention -- 0 CHANGED, 1 NOCHANGE, 2 FAILED -- so 1 is a success worth
+  # stamping and 2 must not be. Guessing 2 meant "nothing to do" would have
+  # rebuilt exactly the bug being fixed.
   say "Arming first-boot growth"
   guest 'cat > /etc/systemd/system/oem-firstboot-grow.service <<'"'"'EOS'"'"'
 [Unit]
 Description=Grow the root filesystem to fill the disk, once
 ConditionPathExists=!/var/lib/oem-firstboot-grown
-DefaultDependencies=no
 After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c '"'"'set -e; r=$(findmnt -no SOURCE /); d=$(lsblk -no PKNAME "$r"); n=$(echo "$r" | grep -o "[0-9]*$"); growpart "/dev/$d" "$n" || true; resize2fs "$r" || true; touch /var/lib/oem-firstboot-grown'"'"'
+Environment=TMPDIR=/run
+ExecStart=/bin/sh -c '"'"'set -e; r=$(findmnt -no SOURCE /); d=$(lsblk -no PKNAME "$r"); n=$(echo "$r" | grep -o "[0-9]*$"); rc=0; growpart "/dev/$d" "$n" || rc=$?; [ "$rc" = 0 ] || [ "$rc" = 1 ] || { echo "growpart exited $rc -- not stamping, will retry next boot" >&2; exit 1; }; resize2fs "$r"; touch /var/lib/oem-firstboot-grown'"'"'
 [Install]
 WantedBy=multi-user.target
 EOS
 systemctl enable oem-firstboot-grow.service 2>&1 | tail -1' 30
   guest_says 'systemctl is-enabled oem-firstboot-grow.service' 15 'enabled' \
     && ok "first-boot grow is enabled" || warn "could not enable the grow unit"
+
+  # Arming the unit is not enough: sealing BOOTS this image, and a unit armed by
+  # a previous seal runs during that boot, inside a VM whose disk is already
+  # full-size. Whatever it decides, the stamp it leaves behind ships. Clear it
+  # last, so the image goes out with the unit armed and nothing claiming it has
+  # already run.
+  guest 'rm -f /var/lib/oem-firstboot-grown; echo rc=$?' 15 >/dev/null
+  if guest_says 'test -e /var/lib/oem-firstboot-grown && echo present || echo absent' 15 'absent'; then
+    ok "no stale grow stamp -- the unit will actually run on first boot"
+  else
+    die "the grow stamp is still present; this image would never resize itself"
+  fi
 
   # Identity. Every copy of this image would otherwise share one machine-id and
   # one set of host keys -- the clone problem this project already hit once with
@@ -655,6 +686,21 @@ systemctl enable oem-firstboot-grow.service 2>&1 | tail -1' 30
   guest 'truncate -s 0 /etc/machine-id; rm -f /var/lib/dbus/machine-id; rm -f /etc/ssh/ssh_host_*; rm -rf /var/lib/tailscale; echo CLE''ARED' 20
   guest_says 'wc -c < /etc/machine-id' 10 '^0$' && ok "machine-id is empty" || warn "machine-id is not empty"
   guest_says 'ls /etc/ssh/ | grep -c ssh_host || true' 10 '^0' && ok "no ssh host keys" || warn "ssh host keys still present"
+
+  # The build's own logs were shipping inside the image: 213 MB of journal from
+  # eight build boots, plus 74 lines of root shell history recording how the
+  # image was assembled. Nothing secret -- the only host either names is
+  # 10.0.2.2, which is QEMU's slirp gateway, not a real machine -- but a person
+  # opening a fresh laptop should not find someone else's build session in it,
+  # and `journalctl -b -1` on a new machine should show nothing.
+  say "Clearing the build's own logs"
+  guest 'rm -f /root/.bash_history /home/*/.bash_history;
+         journalctl --rotate >/dev/null 2>&1; journalctl --vacuum-time=1s >/dev/null 2>&1;
+         rm -rf /var/log/journal/*; echo rc=$?' 60 >/dev/null
+  guest_says 'ls /var/log/journal 2>/dev/null | wc -l' 15 '^0$' \
+    && ok "no build journal ships" || warn "the build journal is still in the image"
+  guest_says 'test -e /root/.bash_history && echo present || echo absent' 15 'absent' \
+    && ok "no root shell history ships" || warn "/root/.bash_history is still in the image"
 
   # Tidying, in two parts that are doing genuinely different jobs.
   #
