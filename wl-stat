@@ -1,0 +1,156 @@
+#!/bin/sh
+# wl-stat -- read live per-association statistics from the wireless link.
+#
+# WHY THIS EXISTS
+#   `iw dev <if> station get <bssid>` needs root on joe-MacBookAir, and a
+#   continuous signal poller would otherwise prompt for a password every cycle.
+#   The obvious fix -- NOPASSWD on /usr/sbin/iw -- is not safe. `iw` is not a
+#   read-only tool:
+#
+#     dev <if> del                      deletes the interface. On a laptop with
+#                                       NO ETHERNET PORT that is total, immediate
+#                                       loss of all network.
+#     dev <if> disconnect               drops the association
+#     dev <if> connect <ssid> [key ...] joins an arbitrary network
+#     dev <if> key get <idx> <mac>      READS ENCRYPTION KEYS
+#     dev <if> interface add type monitor   monitor mode, captures the air
+#     dev <if> switch channel <n>       moves off channel
+#     reg set <country>                 regulatory domain, i.e. legal tx limits
+#     phy coalesce enable <file>        \
+#     dev measurement ftm_request <file> > all parse an ARBITRARY FILE
+#     dev vendor send <oui> <sub> <file>/
+#
+#   So the thing being allowed must not be `iw`.
+#
+# WHY A WRAPPER CAN CLOSE IT HERE, WHICH IS NOT ALWAYS TRUE
+#   The surface above is reachable ONLY through argv. `iw` reads no config file
+#   and no environment variable of its own -- verified with strings(1) and
+#   ldd(1): it links libnl and libc and nothing that carries a dotfile. There is
+#   no attacker-nameable config namespace, so unlike `git status` (where
+#   filter.<NAME>.clean cannot be enumerated) a fixed command line closes the
+#   surface completely.
+#
+#   Therefore: THIS SCRIPT TAKES NO ARGUMENTS. Not "validated arguments" -- none.
+#   The BSSID is derived internally from the live association rather than passed
+#   in, which removes the last piece of caller-controlled input and also makes it
+#   correct across network changes.
+#
+# WHAT TO WHITELIST
+#   The literal path of this file, never `iw`:
+#     joe ALL=(root) NOPASSWD: /usr/local/sbin/wl-stat
+#   No wildcard. A trailing :* would re-admit arguments this script exists to
+#   refuse.
+#
+# WHAT THIS CAN REPORT ON THE AIR -- READ THIS BEFORE INVESTIGATING A BLANK
+#   On the BCM4360 this returns exactly TWO fields and that is CORRECT, not a
+#   fault. wl_cfg80211_get_station() in wl_cfg80211_hybrid.c fills precisely:
+#
+#       WLC_GET_RATE -> NL80211_STA_INFO_TX_BITRATE      (line ~1501)
+#       WLC_GET_RSSI -> NL80211_STA_INFO_SIGNAL          (line ~1517)
+#
+#   That is the whole implementation. signal_avg, rx_bitrate, tx_retries,
+#   tx_failed, beacon_loss and inactive_ms are UNIMPLEMENTED IN THE SHIM -- on
+#   every kernel, in every state. `current time` in iw's output is iw's own
+#   addition, not the driver's.
+#
+#   So `fields=2/8` on the Air is the healthy reading. `fields=8/8` is what an
+#   in-tree driver returns (measured: rtw89 returns 30 fields to the same
+#   subcommand). DO NOT go looking for what broke.
+#
+#   The uncomfortable consequence: tx_retries, tx_failed and beacon_loss
+#   climbing is the classic signature of a link that holds association and
+#   passes nothing -- and none of them exist on this card. The packet counters
+#   that would substitute sit behind the Broadcom private ioctl, measured
+#   closed on 7.x (EOPNOTSUPP as root). Live telemetry here is two numbers.
+#
+# RESIDUAL RISK, stated here rather than assumed
+#   1. This file runs as root. If it is writable by a non-root user, whitelisting
+#      it is whitelisting arbitrary root code. It MUST be root-owned and 0755.
+#      Verify: stat -c '%U %a' /usr/local/sbin/wl-stat  ->  root 755
+#   2. That guarantee is an assumption about the harness: edits to this file must
+#      themselves be gated behind a prompt. True today because writing to
+#      /usr/local/sbin needs sudo. If that ever stops being true, this
+#      construction is theatre.
+#   3. PATH is pinned and both binaries are absolute. Without that, `sudo`
+#      without secure_path preserves the caller's PATH and an unqualified
+#      helper runs as root. Ubuntu sets secure_path by default, so this was
+#      probably inert -- pinned anyway, because a privilege boundary that holds
+#      due to a distro default neither author wrote is not a boundary.
+#   4. It reveals signal strength, bitrate and byte counters for the current
+#      link. That is not sensitive here; it is not nothing on a shared machine.
+#   5. It does NOT reveal keys: `station get` has no key material in its output,
+#      and `key get` is a different subcommand this script cannot reach.
+
+set -eu
+
+# Neutralise inherited PATH explicitly. sudo with env_reset but WITHOUT
+# secure_path PRESERVES THE CALLER'S PATH, so any unqualified binary in this
+# script would be resolved from a directory the caller may control and then
+# executed AS ROOT -- bypassing the argv surface this wrapper exists to close,
+# without touching argv at all. Both belt and braces: fixed PATH *and* absolute
+# paths below, because a future edit that adds a command should be safe by
+# default rather than safe by the author remembering.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+IW=/usr/sbin/iw
+AWK=/usr/bin/awk
+IFACE=wlp3s0
+
+[ "$#" -eq 0 ] || { echo "wl-stat: takes no arguments" >&2; exit 2; }
+[ -x "$IW" ]  || { echo "wl-stat: $IW not executable" >&2; exit 3; }
+[ -x "$AWK" ] || { echo "wl-stat: $AWK not executable" >&2; exit 3; }
+
+# Derive the BSSID from the live association. No caller input reaches iw.
+BSSID=$("$IW" dev "$IFACE" link 2>/dev/null | "$AWK" '/^Connected to/ {print $3; exit}')
+
+if [ -z "${BSSID:-}" ]; then
+    # Not associated is a normal state, not an error, and it must be
+    # DISTINGUISHABLE from "associated but reporting nothing" -- which is the
+    # exact wedge this whole investigation is about. Do not print an empty
+    # success.
+    echo "unassociated"
+    exit 1
+fi
+
+# Reduce to the answer. `station get` output is already narrow, but emitting
+# named fields means a future change to iw's formatting fails loudly instead of
+# silently logging blanks.
+"$IW" dev "$IFACE" station get "$BSSID" 2>/dev/null | "$AWK" -v b="$BSSID" '
+    /signal:/            { sub(/^[^:]*:[ \t]*/,""); sig=$1 }
+    /signal avg:/        { sub(/^[^:]*:[ \t]*/,""); avg=$1 }
+    /tx bitrate:/        { sub(/^[^:]*:[ \t]*/,""); txr=$1 }
+    /rx bitrate:/        { sub(/^[^:]*:[ \t]*/,""); rxr=$1 }
+    /tx retries:/        { sub(/^[^:]*:[ \t]*/,""); retr=$1 }
+    /tx failed:/         { sub(/^[^:]*:[ \t]*/,""); fail=$1 }
+    /beacon loss:/       { sub(/^[^:]*:[ \t]*/,""); bloss=$1 }
+    /inactive time:/     { sub(/^[^:]*:[ \t]*/,""); inact=$1 }
+    END {
+        if (sig == "") { print "no-station-data"; exit 1 }
+        # EMIT ONLY FIELDS THE DRIVER ACTUALLY PROVIDED, and count them.
+        #
+        # Do NOT print key= with an empty value. Measured 2026-08-17 on the
+        # Air: `iw station get` on the BCM4360 returns exactly THREE fields --
+        # signal, tx bitrate, current time. The same command on rtw89 returns
+        # thirty. Six of the nine this script looks for are absent from the
+        # Broadcom driver entirely: signal_avg, rx_bitrate, tx_retries,
+        # tx_failed, beacon_loss, inactive_ms.
+        #
+        # An earlier version printed those as "beacon_loss=" with nothing after
+        # it. A logger consuming that records an empty string forever and a
+        # later reader concludes beacon loss never changed -- which is the
+        # overloaded-empty failure this entire investigation is about, produced
+        # by the tool built to investigate it. An absent field and a zero field
+        # must not share an encoding.
+        n = 0
+        out = ""
+        if (sig   != "") { out = out " signal="      sig;   n++ }
+        if (avg   != "") { out = out " signal_avg="  avg;   n++ }
+        if (txr   != "") { out = out " tx_bitrate="  txr;   n++ }
+        if (rxr   != "") { out = out " rx_bitrate="  rxr;   n++ }
+        if (retr  != "") { out = out " tx_retries="  retr;  n++ }
+        if (fail  != "") { out = out " tx_failed="   fail;  n++ }
+        if (bloss != "") { out = out " beacon_loss=" bloss; n++ }
+        if (inact != "") { out = out " inactive_ms=" inact; n++ }
+        printf "bssid=%s fields=%d/8%s\n", b, n, out
+    }'
