@@ -27,3 +27,6 @@ firmware.bin
 # `git add -A` twice. Rebuild with:
 #   cc -O2 -Wall -o wl-probe wl-probe.c
 wl-probe
+# A documentation indexer's per-checkout settings, kept outside the repository
+# and linked in where it is used.
+.projectbook
