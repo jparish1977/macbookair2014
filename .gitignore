@@ -22,3 +22,6 @@ resume.sh
 firmware.bin
 *.bin
 **/.claude/settings.local.json
+# A documentation indexer's per-checkout settings, kept outside the repository
+# and linked in where it is used.
+.projectbook
