@@ -58,7 +58,7 @@ with open(path, "a", buffering=1) as f:
     while True:
         data, addr = s.recvfrom(9216)
         now = time.time()
-        stamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now%1*1000):03d}"
+        stamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1*1000):03d}"
 
         # A GAP is itself evidence -- it is how you see the machine struggling
         # before it stops. Mark anything over a second so it cannot be missed
